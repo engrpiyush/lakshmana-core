@@ -1,0 +1,47 @@
+# gatekeeper-dispatcher — Cloud Run service, 1 vCPU / 512 MB, min 0 (LLD §13).
+#
+# Thin by design: it claims gates and executes jobs, so it carries no model artifacts and
+# no ONNX runtime. Those live in the worker image, which is why these are two Dockerfiles
+# and not one with a switch.
+
+FROM python:3.12-slim AS builder
+
+COPY --from=ghcr.io/astral-sh/uv:0.10.11 /uv /usr/local/bin/uv
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never
+
+WORKDIR /app
+
+# Dependencies resolve from the lockfile in their own layer, so application edits do not
+# invalidate the expensive step.
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
+
+COPY gatekeeper/ ./gatekeeper/
+# LICENSE too: pyproject declares license = { file = "LICENSE" }, so the project install
+# below fails without it.
+COPY README.md LICENSE ./
+RUN uv sync --frozen --no-dev
+
+
+FROM python:3.12-slim AS runtime
+
+RUN useradd --create-home --uid 1001 gatekeeper
+
+WORKDIR /app
+
+COPY --from=builder --chown=gatekeeper:gatekeeper /app /app
+
+ENV PATH="/app/.venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+USER gatekeeper
+
+# Cloud Run injects PORT; the shell form is what expands it.
+ENV PORT=8080
+EXPOSE 8080
+
+CMD exec uvicorn gatekeeper.dispatcher.app:app --host 0.0.0.0 --port ${PORT}

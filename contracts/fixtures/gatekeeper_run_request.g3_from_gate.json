@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "runRequestId": "3f7c2a18-9b4e-4d6a-8c11-5e2f0a7d9b34",
+  "intakeId": "intake-2026-07-19-reference",
+  "stage3RunId": "stage3run-209claims-001",
+  "gate": "G3_CONTRADICTION",
+  "mode": "FROM_GATE",
+  "triggeredBy": "OPERATOR",
+  "requestTimestamp": "2026-07-19T04:15:00.000Z"
+}

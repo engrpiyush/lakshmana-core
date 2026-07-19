@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_VERSION: "0.10.11"
+
+jobs:
+  lint:
+    name: ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+
+  test:
+    name: pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      # The state machine is only meaningfully tested against real Firestore
+      # transaction semantics, so CI runs the emulator rather than skipping those tests.
+      - name: Start the Firestore emulator
+        run: |
+          docker run -d --name firestore-emulator -p 8082:8082 \
+            gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators \
+            gcloud emulators firestore start --host-port=0.0.0.0:8082
+          for _ in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:8082/ >/dev/null; then
+              echo "emulator up"; exit 0
+            fi
+            sleep 2
+          done
+          echo "emulator did not come up"; docker logs firestore-emulator; exit 1
+
+      - run: uv sync --frozen
+
+      - name: Run tests
+        env:
+          FIRESTORE_EMULATOR_HOST: 127.0.0.1:8082
+          # Turn an unreachable emulator into a failure instead of a silent skip.
+          GATEKEEPER_REQUIRE_EMULATOR: "1"
+        run: uv run pytest
+
+      - name: Stop the emulator
+        if: always()
+        run: docker rm -f firestore-emulator || true
+
+  fixtures:
+    name: golden fixtures are current
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv sync --frozen
+      # Regenerating must be a no-op: a diff here means the contract moved without the
+      # fixtures being reviewed, which is exactly what breaks the Kotlin side (D-6).
+      - run: uv run python scripts/generate_fixtures.py
+      - run: git diff --exit-code contracts/fixtures/
+
+  images:
+    name: images build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the dispatcher image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.dispatcher
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Build the worker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.worker
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

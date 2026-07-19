@@ -1,0 +1,15 @@
+.git/
+.github/
+.venv/
+.claude/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+tests/
+execution-plan/
+handoff-archive/
+scripts/
+contracts/
+*.md
+!README.md

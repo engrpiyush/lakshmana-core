@@ -1,0 +1,50 @@
+{"id": "sp-001", "premise": "The company reported revenue of 4.2 billion dollars in the third quarter.", "hypothesis": "The company's third-quarter revenue was 4.2 billion dollars.", "lean": "ENTAIL"}
+{"id": "sp-002", "premise": "The company reported revenue of 4.2 billion dollars in the third quarter.", "hypothesis": "The company's third-quarter revenue was 1.1 billion dollars.", "lean": "CONTRADICT"}
+{"id": "sp-003", "premise": "The company reported revenue of 4.2 billion dollars in the third quarter.", "hypothesis": "The company opened a new distribution centre in Malaysia.", "lean": "NEUTRAL"}
+{"id": "sp-004", "premise": "The treaty was signed by all twelve member states in March.", "hypothesis": "Every member state signed the treaty in March.", "lean": "ENTAIL"}
+{"id": "sp-005", "premise": "The treaty was signed by all twelve member states in March.", "hypothesis": "Two member states refused to sign the treaty.", "lean": "CONTRADICT"}
+{"id": "sp-006", "premise": "The treaty was signed by all twelve member states in March.", "hypothesis": "The treaty runs to ninety pages.", "lean": "NEUTRAL"}
+{"id": "sp-007", "premise": "The vaccine reduced hospitalisation rates by roughly sixty percent in the trial.", "hypothesis": "Hospitalisations fell by about sixty percent among trial participants.", "lean": "ENTAIL"}
+{"id": "sp-008", "premise": "The vaccine reduced hospitalisation rates by roughly sixty percent in the trial.", "hypothesis": "The vaccine had no measurable effect on hospitalisation rates.", "lean": "CONTRADICT"}
+{"id": "sp-009", "premise": "The vaccine reduced hospitalisation rates by roughly sixty percent in the trial.", "hypothesis": "The trial was funded by a consortium of universities.", "lean": "NEUTRAL"}
+{"id": "sp-010", "premise": "Construction of the bridge finished two years behind schedule.", "hypothesis": "The bridge was completed late.", "lean": "ENTAIL"}
+{"id": "sp-011", "premise": "Construction of the bridge finished two years behind schedule.", "hypothesis": "The bridge was delivered ahead of its original timeline.", "lean": "CONTRADICT"}
+{"id": "sp-012", "premise": "Construction of the bridge finished two years behind schedule.", "hypothesis": "The bridge carries four lanes of traffic.", "lean": "NEUTRAL"}
+{"id": "sp-013", "premise": "The minister resigned the day after the report was published.", "hypothesis": "The minister left office following the report's publication.", "lean": "ENTAIL"}
+{"id": "sp-014", "premise": "The minister resigned the day after the report was published.", "hypothesis": "The minister remained in post throughout the year.", "lean": "CONTRADICT"}
+{"id": "sp-015", "premise": "The minister resigned the day after the report was published.", "hypothesis": "The report was commissioned by parliament.", "lean": "NEUTRAL"}
+{"id": "sp-016", "premise": "Average sea surface temperature rose by 0.8 degrees over the decade.", "hypothesis": "Sea surface temperature increased during the decade.", "lean": "ENTAIL"}
+{"id": "sp-017", "premise": "Average sea surface temperature rose by 0.8 degrees over the decade.", "hypothesis": "Sea surface temperature cooled steadily over the decade.", "lean": "CONTRADICT"}
+{"id": "sp-018", "premise": "Average sea surface temperature rose by 0.8 degrees over the decade.", "hypothesis": "Measurements were taken by autonomous buoys.", "lean": "NEUTRAL"}
+{"id": "sp-019", "premise": "The court dismissed the appeal on procedural grounds.", "hypothesis": "The appeal was not upheld.", "lean": "ENTAIL"}
+{"id": "sp-020", "premise": "The court dismissed the appeal on procedural grounds.", "hypothesis": "The court ruled in favour of the appellant.", "lean": "CONTRADICT"}
+{"id": "sp-021", "premise": "The court dismissed the appeal on procedural grounds.", "hypothesis": "The hearing lasted three days.", "lean": "NEUTRAL"}
+{"id": "sp-022", "premise": "Only eleven of the forty applicants met the eligibility criteria.", "hypothesis": "Fewer than half the applicants were eligible.", "lean": "ENTAIL"}
+{"id": "sp-023", "premise": "Only eleven of the forty applicants met the eligibility criteria.", "hypothesis": "All forty applicants were eligible.", "lean": "CONTRADICT"}
+{"id": "sp-024", "premise": "Only eleven of the forty applicants met the eligibility criteria.", "hypothesis": "Applications closed at the end of June.", "lean": "NEUTRAL"}
+{"id": "sp-025", "premise": "The factory has operated continuously since 1974.", "hypothesis": "The factory has been running for decades.", "lean": "ENTAIL"}
+{"id": "sp-026", "premise": "The factory has operated continuously since 1974.", "hypothesis": "The factory shut down for most of the 1980s.", "lean": "CONTRADICT"}
+{"id": "sp-027", "premise": "The factory has operated continuously since 1974.", "hypothesis": "The factory employs around six hundred people.", "lean": "NEUTRAL"}
+{"id": "sp-028", "premise": "Researchers found no statistically significant difference between the two groups.", "hypothesis": "The difference between the groups was not significant.", "lean": "ENTAIL"}
+{"id": "sp-029", "premise": "Researchers found no statistically significant difference between the two groups.", "hypothesis": "The study found a strong significant effect between groups.", "lean": "CONTRADICT"}
+{"id": "sp-030", "premise": "Researchers found no statistically significant difference between the two groups.", "hypothesis": "The study enrolled participants from four countries.", "lean": "NEUTRAL"}
+{"id": "sp-031", "premise": "The election turnout was the lowest recorded since the war.", "hypothesis": "Turnout hit a postwar low.", "lean": "ENTAIL"}
+{"id": "sp-032", "premise": "The election turnout was the lowest recorded since the war.", "hypothesis": "Turnout reached a record high.", "lean": "CONTRADICT"}
+{"id": "sp-033", "premise": "The election turnout was the lowest recorded since the war.", "hypothesis": "Polling stations closed at nine in the evening.", "lean": "NEUTRAL"}
+{"id": "sp-034", "premise": "The merger was approved by regulators without conditions.", "hypothesis": "Regulators cleared the merger unconditionally.", "lean": "ENTAIL"}
+{"id": "sp-035", "premise": "The merger was approved by regulators without conditions.", "hypothesis": "Regulators blocked the merger outright.", "lean": "CONTRADICT"}
+{"id": "sp-036", "premise": "The merger was approved by regulators without conditions.", "hypothesis": "The two firms had competed for over a decade.", "lean": "NEUTRAL"}
+{"id": "sp-037", "premise": "Snowfall in the region was well below the seasonal average.", "hypothesis": "The region saw less snow than usual.", "lean": "ENTAIL"}
+{"id": "sp-038", "premise": "Snowfall in the region was well below the seasonal average.", "hypothesis": "The region recorded unusually heavy snowfall.", "lean": "CONTRADICT"}
+{"id": "sp-039", "premise": "Snowfall in the region was well below the seasonal average.", "hypothesis": "The region depends on winter tourism.", "lean": "NEUTRAL"}
+{"id": "sp-040", "premise": "The manuscript was dated to the early fifteenth century by carbon analysis.", "hypothesis": "Carbon analysis placed the manuscript in the 1400s.", "lean": "ENTAIL"}
+{"id": "sp-041", "premise": "The manuscript was dated to the early fifteenth century by carbon analysis.", "hypothesis": "The manuscript is a nineteenth-century forgery.", "lean": "CONTRADICT"}
+{"id": "sp-042", "premise": "The manuscript was dated to the early fifteenth century by carbon analysis.", "hypothesis": "The manuscript is written on vellum.", "lean": "NEUTRAL"}
+{"id": "sp-043", "premise": "Exports grew for the fifth consecutive quarter.", "hypothesis": "Exports have risen in each of the last five quarters.", "lean": "ENTAIL"}
+{"id": "sp-044", "premise": "Exports grew for the fifth consecutive quarter.", "hypothesis": "Exports contracted in the most recent quarter.", "lean": "CONTRADICT"}
+{"id": "sp-045", "premise": "Exports grew for the fifth consecutive quarter.", "hypothesis": "Most exports are shipped through the northern port.", "lean": "NEUTRAL"}
+{"id": "sp-046", "premise": "The species has not been observed in the wild since 1998.", "hypothesis": "There have been no confirmed wild sightings for over two decades.", "lean": "ENTAIL"}
+{"id": "sp-047", "premise": "The species has not been observed in the wild since 1998.", "hypothesis": "The species is regularly seen in the wild today.", "lean": "CONTRADICT"}
+{"id": "sp-048", "premise": "The species has not been observed in the wild since 1998.", "hypothesis": "The species nests in coastal cliffs.", "lean": "NEUTRAL"}
+{"id": "sp-049", "premise": "The satellite completed its final transmission in October before going dark.", "hypothesis": "The satellite stopped transmitting after October.", "lean": "ENTAIL"}
+{"id": "sp-050", "premise": "The satellite completed its final transmission in October before going dark.", "hypothesis": "The satellite continues to send data on schedule.", "lean": "CONTRADICT"}

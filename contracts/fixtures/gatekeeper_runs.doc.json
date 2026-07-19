@@ -1,0 +1,109 @@
+{
+  "schemaVersion": 1,
+  "runRequestId": "3f7c2a18-9b4e-4d6a-8c11-5e2f0a7d9b34",
+  "intakeId": "intake-2026-07-19-reference",
+  "stage3RunId": "stage3run-209claims-001",
+  "requestTimestamp": "2026-07-19T04:15:00.000Z",
+  "triggeredBy": "OPERATOR",
+  "judgeMode": "GATEKEEPER",
+  "mode": "FULL",
+  "state": "RUNNING",
+  "supersededBy": null,
+  "configSnapshot": {
+    "rosterVersion": "v1",
+    "g1": {
+      "model": "modernbert-base-nli@v1",
+      "sha256": "",
+      "neutralMin": 0.95,
+      "repeatMin": 0.9,
+      "contraEscape": 0.02,
+      "maxSeqTokens": 512
+    },
+    "g2": {
+      "model": "minicheck-deberta-l@v1",
+      "sha256": "",
+      "supportMin": 0.9,
+      "supportFloor": 0.5,
+      "groundingMode": "AUTO"
+    },
+    "g3": {
+      "model": "deberta-mnli-fever-anli@v1",
+      "sha256": "",
+      "contraMin": 0.85,
+      "agreementRule": "TWO_FAMILY"
+    },
+    "g4": {
+      "llmModel": "pending-lite-pin",
+      "maxLlmPairs": 3000,
+      "thinkingBudget": 512
+    }
+  },
+  "gates": {
+    "G1_NEUTRAL": {
+      "state": "SUCCEEDED",
+      "attempt": 1,
+      "sweepAttempt": 0,
+      "leaseOwner": null,
+      "leaseExpiresAt": null,
+      "startedAt": "2026-07-19T04:15:03.000Z",
+      "endedAt": "2026-07-19T04:25:41.000Z",
+      "counters": {
+        "seen": 12208,
+        "neutral": 10450,
+        "repeats": 160,
+        "contraFlagged": 140,
+        "forwarded": 1598,
+        "truncated": 0,
+        "ctxDisagreed": 0
+      },
+      "errorCode": null,
+      "errorDetail": null
+    },
+    "G2_CORROBORATION": {
+      "state": "RUNNING",
+      "attempt": 1,
+      "sweepAttempt": 0,
+      "leaseOwner": "worker/gatekeeper-worker-00001-abc/task-0",
+      "leaseExpiresAt": "2026-07-19T05:57:44.000Z",
+      "startedAt": "2026-07-19T04:27:44.000Z",
+      "endedAt": null,
+      "counters": {},
+      "errorCode": null,
+      "errorDetail": null
+    },
+    "G3_CONTRADICTION": {
+      "state": "PENDING",
+      "attempt": 0,
+      "sweepAttempt": 0,
+      "leaseOwner": null,
+      "leaseExpiresAt": null,
+      "startedAt": null,
+      "endedAt": null,
+      "counters": {},
+      "errorCode": null,
+      "errorDetail": null
+    },
+    "G4_ESCALATION": {
+      "state": "PENDING",
+      "attempt": 0,
+      "sweepAttempt": 0,
+      "leaseOwner": null,
+      "leaseExpiresAt": null,
+      "startedAt": null,
+      "endedAt": null,
+      "counters": {},
+      "errorCode": null,
+      "errorDetail": null
+    }
+  },
+  "totals": {
+    "pairsSeen": 0,
+    "decidedByGates": 0,
+    "escalatedLlm": 0,
+    "escalatedHuman": 0,
+    "shadowDisagreed": 0,
+    "llmSpendUsd": 0.0
+  },
+  "createdAt": "2026-07-19T04:15:02.500Z",
+  "updatedAt": "2026-07-19T04:27:44.125Z"
+}

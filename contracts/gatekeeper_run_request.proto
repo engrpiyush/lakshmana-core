@@ -1,0 +1,58 @@
+// The only message that crosses the vishwamitra <-> lakshmana boundary (LLD §5, D-6).
+//
+// IDs only: claim text never transits Pub/Sub (privacy + size discipline), and config
+// is not carried either — it is frozen into gatekeeper_runs.configSnapshot when the run
+// doc is created, so a mid-run config edit cannot produce a mixed-calibration run.
+//
+// This file is the normative schema. Neither repo generates code from it at build time
+// (D-6: no shared code artifact); both sides hand-write the mapping and pin it with the
+// golden fixtures in contracts/fixtures/. tests/test_payload_contract.py asserts the
+// Python codec still matches this file field-for-field.
+//
+// proto3 JSON mapping gives lowerCamelCase keys — identical casing to Firestore.
+
+syntax = "proto3";
+
+package ai.vishwakarma.gatekeeper.v1;
+
+option java_package = "ai.vishwakarma.gatekeeper.contract.v1";
+option java_multiple_files = true;
+
+// The cascade gates. FINALIZE is deliberately not here: it is an internal worker step
+// after G4, never published and never a key in the run doc's gate map (LLD §7.1, §8).
+enum Gate {
+  GATE_UNSPECIFIED = 0;
+  G1_NEUTRAL = 1;
+  G2_CORROBORATION = 2;
+  G3_CONTRADICTION = 3;
+  G4_ESCALATION = 4;
+}
+
+// FULL drives the whole chain from G1; FROM_GATE re-enters at one failed gate,
+// retaining earlier gates' outputs (LLD §10).
+enum Mode {
+  MODE_UNSPECIFIED = 0;
+  FULL = 1;
+  FROM_GATE = 2;
+}
+
+message GatekeeperRunRequest {
+  // Starts at 1. An unknown version goes straight to the DLQ, never guessed (LLD §11).
+  int32 schema_version = 1;
+
+  // UUIDv4 minted by the publisher; the idempotency root. The transactional claim —
+  // not Pub/Sub — is what makes duplicates no-ops (LLD §6 rule 2).
+  string run_request_id = 2;
+
+  string intake_id = 3;
+  string stage3_run_id = 4;
+
+  Gate gate = 5;
+  Mode mode = 6;
+
+  // OPERATOR | SYSTEM | SWEEPER
+  string triggered_by = 7;
+
+  // RFC3339 UTC, when the triggering request was minted.
+  string request_timestamp = 8;
+}
