@@ -17,6 +17,7 @@ __all__ = [
     "RunMode",
     "RunState",
     "TriggeredBy",
+    "Verdict",
     "next_gate",
     "prior_gate",
 ]
@@ -108,6 +109,21 @@ class JudgeMode(StrEnum):
     LLM = "LLM"
     GATEKEEPER = "GATEKEEPER"
     SHADOW = "SHADOW"
+
+
+class Verdict(StrEnum):
+    """The pair-level verdicts the cascade can reach (LLD §8).
+
+    ``CONTRADICTS`` is deliberately not something a gate *decides*: G3 routes
+    contradiction candidates to the human queue and the human confirms, exactly as the
+    LLM ensemble does today. It appears here because the replay corpus is labelled with
+    the ensemble's own verdicts, which do include it.
+    """
+
+    NEUTRAL = "NEUTRAL"
+    REPEATS = "REPEATS"
+    CORROBORATES = "CORROBORATES"
+    CONTRADICTS = "CONTRADICTS"
 
 
 class Method(StrEnum):

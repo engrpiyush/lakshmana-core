@@ -19,7 +19,9 @@ from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-__all__ = ["SETTINGS", "Config", "Setting", "load_config"]
+from gatekeeper.enums import Gate
+
+__all__ = ["SETTINGS", "Config", "GateBinding", "Setting", "load_config"]
 
 
 def _to_bool(raw: str) -> bool:
@@ -126,6 +128,15 @@ SETTINGS: tuple[Setting, ...] = (
         float,
         ("g3", "contraMin"),
     ),
+    # Named in LLD §8's decide_g3 pseudocode but never given a key or a proposed value.
+    # Added as a proposal like the rest of §8's numbers; the bake-off sets it.
+    Setting(
+        "gatekeeper.gates.g3.neutral-consensus",
+        "GATEKEEPER_G3_NEUTRAL_CONSENSUS",
+        0.10,
+        float,
+        ("g3", "neutralConsensus"),
+    ),
     Setting(
         "gatekeeper.gates.g3.agreement-rule",
         "GATEKEEPER_G3_AGREEMENT_RULE",
@@ -172,6 +183,7 @@ SETTINGS: tuple[Setting, ...] = (
         str,
     ),
     Setting("gatekeeper.firestore.project-id", "GATEKEEPER_FIRESTORE_PROJECT_ID", "", str),
+    Setting("gatekeeper.firestore.database", "GATEKEEPER_FIRESTORE_DATABASE", "(default)", str),
     Setting("gatekeeper.pubsub.topic", "GATEKEEPER_PUBSUB_TOPIC", "gatekeeper-requests", str),
     Setting("gatekeeper.worker.job-name", "GATEKEEPER_WORKER_JOB_NAME", "gatekeeper-worker", str),
     Setting("gatekeeper.worker.job-region", "GATEKEEPER_WORKER_JOB_REGION", "asia-southeast1", str),
@@ -281,3 +293,63 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
 def setting_for(key: str) -> Setting:
     """Look up a setting by its kebab-case key."""
     return _BY_KEY[key]
+
+
+# --- per-gate binding --------------------------------------------------------------------
+
+GATE_SLOT: dict[Gate, str] = {
+    Gate.G1_NEUTRAL: "g1",
+    Gate.G2_CORROBORATION: "g2",
+    Gate.G3_CONTRADICTION: "g3",
+}
+"""Gate → snapshot slot. G4 is absent by design: it calls Vertex, not an ONNX artifact."""
+
+DEFAULT_MAX_SEQ_TOKENS = 512
+"""What a gate reads when its slot does not pin a budget. Only G1 pins one (LLD §8)."""
+
+
+@dataclass(frozen=True, slots=True)
+class GateBinding:
+    """Which artifact a gate runs and how much of a pair it may read.
+
+    The companion to :class:`~gatekeeper.gates.decisions.Thresholds`: that one carries every
+    *number* a gate reads off ``configSnapshot``, this one carries every *artifact* choice.
+    Both are resolved from the snapshot and never from live config, because the freeze
+    invariant (LLD §5) covers the model just as much as the thresholds — a run that started
+    on ``modernbert-base-nli@v1`` must finish on it, even if an operator edits the config
+    between G1 and G3, and a FROM_GATE resume must pick up the same artifact the earlier
+    gates used. Only a FROM_START run, which gets a new ``runRequestId`` and a fresh
+    snapshot, may move to a new model.
+    """
+
+    gate: Gate
+    model: str
+    sha256: str
+    max_seq_tokens: int
+
+    @classmethod
+    def from_snapshot(cls, snapshot: Mapping[str, Any], gate: Gate) -> GateBinding:
+        """Resolve ``gate``'s artifact from a ``configSnapshot`` mapping.
+
+        Missing keys fall back to the shipped defaults — the same LLD proposals
+        :data:`SETTINGS` declares — so a run doc frozen before a slot gained a key still
+        resolves instead of failing mid-cascade.
+
+        Raises:
+            ValueError: for a gate that has no encoder artifact (G4).
+        """
+        slot = GATE_SLOT.get(gate)
+        if slot is None:
+            raise ValueError(f"{gate.value} has no ONNX artifact; it escalates to Vertex")
+
+        row = snapshot.get(slot) or {}
+        tokens_setting = _BY_KEY.get(f"gatekeeper.gates.{slot}.max-seq-tokens")
+        return cls(
+            gate=gate,
+            model=str(row.get("model") or _BY_KEY[f"gatekeeper.gates.{slot}.model"].default),
+            sha256=str(row.get("sha256") or ""),
+            max_seq_tokens=int(
+                row.get("maxSeqTokens")
+                or (tokens_setting.default if tokens_setting else DEFAULT_MAX_SEQ_TOKENS)
+            ),
+        )

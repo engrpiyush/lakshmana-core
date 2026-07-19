@@ -4,6 +4,8 @@ Lakshmana is the **gatekeeper**: an LLM-free encoder gate cascade (G1_NEUTRAL �
 
 ## HARD RULES
 
+0. **ANY LENGTHY EVALUATION IS NOT PART OF THIS SCOPE** (owner directive 2026-07-19). No model bake-offs, benchmark sweeps, threshold searches, or dataset-scale inference in any session — these monopolize the owner's machine. Correctness smoke checks only: ≤200 pairs and ≤2 minutes of model CPU, ever. Anything longer goes to `execution-plan/DEFERRED-LIVE.md` (see items 18–19). This rule overrides any session-file or LLD text that implies otherwise.
+
 1. **NEVER run `git commit` or `git push`.** End-of-session: print the commit message in chat (no double quotes; subject + one-line bullets). The owner commits. Sessions may build on uncommitted work from prior sessions — never revert, stash, or `checkout --` anything you didn't write this session.
 2. **NEVER run infra-mutating commands**: no `terraform apply/destroy/import`, no `gcloud`/`gsutil` mutations, no deploys. `terraform fmt`/`validate` are fine; `terraform plan` only with explicit owner approval in-session. The owner runs all applies and deploys.
 3. **NEVER modify `vishwamitra-core`.** It is read-only reference (code patterns, scripts, runbooks). Vishwamitra-side work (session00, session07) happens in separate sessions over there.

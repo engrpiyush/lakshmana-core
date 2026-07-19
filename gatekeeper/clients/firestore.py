@@ -44,14 +44,21 @@ def firestore_client(
         otherwise an ADC-authenticated client.
     """
     resolved = project_id or (config.get_str("gatekeeper.firestore.project-id") if config else "")
+    database = (config.get_str("gatekeeper.firestore.database") if config else "") or "(default)"
 
     if is_emulator():
         resolved = resolved or os.environ.get("GOOGLE_CLOUD_PROJECT") or _EMULATOR_PROJECT_FALLBACK
         log.info(
             "using firestore emulator",
-            fields={"host": os.environ[EMULATOR_ENV_VAR], "projectId": resolved},
+            fields={
+                "host": os.environ[EMULATOR_ENV_VAR],
+                "projectId": resolved,
+                "database": database,
+            },
         )
-        return firestore.Client(project=resolved, credentials=AnonymousCredentials())
+        return firestore.Client(
+            project=resolved, database=database, credentials=AnonymousCredentials()
+        )
 
     if not resolved:
         # ADC can infer a project, but an unset one here usually means a missing env
@@ -60,4 +67,4 @@ def firestore_client(
             "no Firestore project configured; set GATEKEEPER_FIRESTORE_PROJECT_ID "
             "or GOOGLE_CLOUD_PROJECT"
         )
-    return firestore.Client(project=resolved)
+    return firestore.Client(project=resolved, database=database)

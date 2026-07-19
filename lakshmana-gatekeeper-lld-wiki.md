@@ -1,6 +1,6 @@
 # Gatekeeper — Stage 3 Judge Cascade LLD (Lakshmana)
 
-> v1.2 · 2026-07-19 (v1.2: §8 checkpoint ids verified, §12 log-metric contracts, §13 artifact pin chain + local mirror mode, O‑4 closed; v1.1: mermaid diagrams, Figures 1–4) · Status: **design approved for build; numeric thresholds pending the LK‑5 replay report**
+> v1.4 · 2026-07-19 (v1.4: **calibration decoupled from build** — §8 models are config-selectable with v1 defaults, §15 GO bar is no longer a build gate, per-run freeze invariant stated explicitly, O‑1/O‑2 re-scoped, O‑7 closed; v1.3: §8 artifact precision policy + `neutralConsensus` + G3 ordering, §13 per-precision bucket layout, §15 grid search and the escape-hatch finding; v1.2: §8 checkpoint ids verified, §12 log-metric contracts, §13 artifact pin chain + local mirror mode, O‑4 closed; v1.1: mermaid diagrams, Figures 1–4) · Status: **design approved for build; sessions 04–06 build against the v1 defaults, numeric thresholds calibrated afterwards (§15)**
 > Confluence: child of Stage 3 LLD (249528322) · Mirror: `lakshmana-core/lakshmana-gatekeeper-lld-wiki.md`
 > Companions: Stage 3 LLD §11 (JUDGE), cost wiki 253001729 §9, `PLAN-stage3-cost-cut.md` (Workstream C is **superseded** by this document).
 
@@ -207,7 +207,7 @@ Transition rules (all inside Firestore transactions on the `gatekeeper_runs` doc
     rosterVersion: "v1",
     g1: { model: "modernbert-base-nli@v1", sha256, neutralMin, repeatMin, contraEscape, maxSeqTokens },
     g2: { model: "minicheck-deberta-l@v1",  sha256, supportMin, supportFloor, groundingMode },
-    g3: { model: "deberta-mnli-fever-anli@v1", sha256, contraMin, agreementRule },
+    g3: { model: "deberta-mnli-fever-anli@v1", sha256, contraMin, neutralConsensus, agreementRule },
     g4: { llmModel: "<pinned lite row>", maxLlmPairs, thinkingBudget }
   },
   gates: { G1_NEUTRAL: { state, attempt, sweepAttempt, leaseOwner, leaseExpiresAt,
@@ -278,7 +278,15 @@ Lakshmana **writes**: `gatekeeper_runs`, `stage3_edges` (gatekeeper methods + `s
 
 Every slot is model-agnostic, so adopting an alternate is a `configSnapshot` change, not a code change.
 
-Numeric thresholds below are **proposals**; LK‑5 replay sets the real values and the owner signs them.
+**Artifact precision (VA-97, 2026-07-19).** Each artifact mirrors fp32 **and** INT8 and names one as the *shipping* precision in its manifest; the loader fetches only that one. INT8 ships only by clearing the export-time sanity diff against its own fp32 parent (mean |Δp| ≤ 0.02, max |Δp| ≤ 0.15, label agreement ≥ 98%). On the first full mirror **all seven exportable checkpoints failed it and ship fp32** — mean |Δp| 0.015–0.155, max 0.23–0.94, agreement 84–98%. Dynamic per-channel INT8 is simply not value-preserving on these architectures. Consequences the plan has to absorb: artifacts are 2.5–4× larger than the "Size (INT8)" column above, and §16's wall-clock and memory estimates are optimistic by roughly the same factor. The INT8 graphs stay mirrored alongside, so a better quantizer re-decides each row without re-downloading. Failing numbers are recorded in the manifest's `sanity` block, and the manifest digest covers them, so a demotion is auditable six months later.
+
+**Label order is verified, not assumed.** NLI column order differs across the roster — G1 is entailment/neutral/contradiction, the `nli-deberta-v3-small` alternate is contradiction/entailment/neutral, VitaminC uses FEVER's SUPPORTS/REFUTES/NOT ENOUGH INFO — and `ettinx-nli-s` ships the transformers default `LABEL_0/1/2` with no semantics at all. A wrong mapping does not crash; it silently discards contradictions as NEUTRAL. The scorer therefore refuses an unmappable head rather than guessing positionally, and `scripts/probe_label_order.py` confirms every row against the 50-pair sanity fixture (all five NLI rows verified 2026-07-19, ≥98% agreement at a 62-point margin over the runner-up permutation).
+
+Numeric thresholds below are **proposals**; LK‑5 replay sets the real values and the owner signs them. Until then they are the shipped defaults, and the build proceeds on them (§15).
+
+**Every model is selected by config, not by code (owner directive 2026-07-19).** Each encoder gate reads its artifact from `configSnapshot.g{1,2,3}.model` — defaults `modernbert-base-nli@v1`, `minicheck-deberta-l@v1`, `deberta-mnli-fever-anli@v1` — with its pin in `.sha256` and its token budget in `.maxSeqTokens`. Any mirrored artifact, roster row or alternate, is swappable by config alone; adopting a bake-off winner is a config change, never a code change. `gatekeeper.config.GateBinding` is the single resolver, the artifact-side companion to `Thresholds` on the numbers side.
+
+**The per-run freeze invariant.** The model *and* the thresholds are frozen into `configSnapshot` when the run doc is created (§6 rule 1, §7.1), and every gate and every FROM_GATE resume reads that snapshot rather than live config. Only a FROM_START — a new `runRequestId`, a new run doc — picks up new config. Freezing the thresholds without the model would still allow a mixed-calibration run, so the two are frozen and resolved together; `tests/test_freeze_invariant.py` proves it from all three sides (resolution, loading, resume).
 
 ### G1_NEUTRAL — sees 100% of capped pairs
 
@@ -321,10 +329,17 @@ decide_g3(pair, s1, s3):
   if famA >= contraMin (0.85) and famB >= contraMin:
       route(HUMAN, "CONTRADICTS-candidate"); return   # cascade NEVER finalizes CONTRADICTS;
                                                       # the human queue confirms, as today
-  if famA < neutralConsensus and famB < neutralConsensus and both_neutral_lean:
+  if famA < neutralConsensus (0.10) and famB < neutralConsensus and both_neutral_lean:
       decide(NEUTRAL, GK_G3_XCHECK); return
   escalate(G4, STAGE_DISAGREEMENT)
 ```
+
+Two gaps VA-97 had to close, both resolved toward escalating rather than deciding:
+
+- **`neutralConsensus`** was named here but had no config key and no proposed value. It is now `gatekeeper.gates.g3.neutral-consensus` (env `GATEKEEPER_G3_NEUTRAL_CONSENSUS`), default **0.10**, a proposal like every other number in this section, and it appears in `configSnapshot.g3`.
+- **`both_neutral_lean`** was undefined. It reads as *neutral is the argmax in both directions of both families* — the strictest available reading. Anything looser lets a pair the two families disagree about be discarded as NEUTRAL, which is precisely what the cross-check exists to prevent.
+
+**Gate ordering for flagged pairs.** A pair carrying G1's contradiction flag reaches G3 whatever G2 thinks of it — this section's own G3 heading says it sees "contradiction-flagged + G2 leftovers". G2 is therefore not allowed to finalize CORROBORATES on a flagged pair; doing so would put a contradiction signal beyond the reach of the cross-check meant to adjudicate it. Figure 4's funnel is unchanged in shape.
 
 ### G4_ESCALATION — target ≤ 5%; hard cap `maxLlmPairs` (3,000)
 
@@ -401,7 +416,9 @@ Both metrics may be applied before the emitting code exists; they simply read ze
 
 Resource names as built: push subscription `gatekeeper-requests-push`, DLQ inspection subscription `gatekeeper-requests-dlq-pull` (pull, not push — a poisoned message is replayed by an operator from the runbook, never automatically). The Pub/Sub **service agent** additionally holds `pubsub.publisher` on the DLQ topic and `pubsub.subscriber` on the push subscription; without both the dead-letter policy is configured but inert. The dispatcher also holds `iam.serviceAccountUser` on `gatekeeper-worker-sa`, because starting a job means acting as the job's identity.
 
-**Artifact pin chain.** The `sha256` in each gate's config is the digest of the artifact's **`manifest.json` canonical bytes** (`json.dumps(sort_keys=True, separators=(",",":"))` + `\n`), and the manifest in turn carries a `sha256` + byte count for each of `model.onnx` / `tokenizer.json` / `config.json`. One short value per gate therefore covers hundreds of megabytes transitively, and it is small enough to live in `configSnapshot` — so an auditor reading a six-month-old run doc can prove which bytes produced its verdicts. The manifest also pins `sourceCheckpoint` + `sourceRevision` (the upstream commit sha, never a branch name). Any mismatch at any link is `GK_E_MODEL_FETCH`. An empty config `sha256` means *unpinned*: the artifact still loads (config ships blank until LK‑4 has mirrored anything) but every load logs a WARNING carrying the observed digest.
+**Bucket layout (manifest schemaVersion 2).** `gs://<bucket>/<name>/<version>/<precision>/{model.onnx,tokenizer.json,config.json}` with one `manifest.json` at `<name>/<version>/`. `precision` is `fp32` or `int8`; both are mirrored, the manifest's top-level `precision` field names the shipping one, and the loader materializes only that one into its disk cache (flattened, so nothing downstream needs to know which it got). The manifest is always written **last** — until it exists the loader treats the prefix as absent, so a half-finished upload is invisible rather than corrupt.
+
+**Artifact pin chain.** The `sha256` in each gate's config is the digest of the artifact's **`manifest.json` canonical bytes** (`json.dumps(sort_keys=True, separators=(",",":"))` + `\n`), and the manifest in turn carries a `sha256` + byte count for each of `model.onnx` / `tokenizer.json` / `config.json`, **per mirrored precision**. Because the digest covers the `precision` field and the recorded `sanity` numbers, demoting an artifact from INT8 to fp32 necessarily breaks the config pin — which is correct, since it changes which bytes produce verdicts. One short value per gate therefore covers hundreds of megabytes transitively, and it is small enough to live in `configSnapshot` — so an auditor reading a six-month-old run doc can prove which bytes produced its verdicts. The manifest also pins `sourceCheckpoint` + `sourceRevision` (the upstream commit sha, never a branch name). Any mismatch at any link is `GK_E_MODEL_FETCH`. An empty config `sha256` means *unpinned*: the artifact still loads (config ships blank until LK‑4 has mirrored anything) but every load logs a WARNING carrying the observed digest.
 
 **Loader source modes.** `GATEKEEPER_MODELS_BUCKET` is the deployed path. `GATEKEEPER_MODELS_LOCAL_DIR` points the same loader at a directory laid out identically to the bucket, and wins when set — this is how the LK‑5 replay bake-off runs the *production* loader before anything has been mirrored to GCS. Verification is identical in both modes; a mode that skipped digest checks would be measuring code that never ships. Terraform leaves the local override empty, so a deployed worker cannot silently fall back to a directory that happens to exist.
 
@@ -428,8 +445,32 @@ Publish failures: bounded retry with backoff; terminal publish failure surfaces 
 
 ## 15. Replay & cutover plan
 
+> **Calibration is decoupled from the build (owner directive 2026-07-19).** The full-corpus
+> evaluation was stopped mid-run — it monopolised the owner's machine — and the GO bar below
+> is **no longer a gate on sessions 04–06**. Those sessions build against §8's v1 defaults;
+> model selection and threshold calibration happen afterwards, as a separate exercise, and
+> land as a config change (no code change — see §8's config-selection note).
+> **O‑1 and O‑2 therefore remain open**, and the work to close them is tracked in
+> `execution-plan/DEFERRED-LIVE.md` items 17–19: item 18 mirrors every artifact to the
+> bucket, item 19 resumes the bake-off from its per-artifact score cache (4 of 7 artifacts
+> already scored under `var/replay/scores/`; the grid search afterwards is seconds), and
+> item 17 exports the second corpus O‑2 needs. The harness, the corpus and the cache below
+> are deliverables as they stand — steps 1 and 2 describe how calibration *will* run, not
+> something the build waits on.
+
 1. **LK‑5 replay (zero LLM spend)** — export the 12,208 ensemble-labeled pairs (+ votes, golden pairs) from the Firestore backup via the emulator-restore flow into JSONL; run every roster candidate + alternates per gate through the *production gate code*; sweep thresholds. Report: per-verdict P/R, NEUTRAL precision/coverage, **CONTRADICTS recall vs golden pairs**, calibration (ECE), projected G4 volume, wall-clock.
-2. **GO bar (owner signs at the report):** NEUTRAL precision ≥ 0.95 at ≥ 60% coverage · CONTRADICTS recall ≥ 95% of the ensemble's own recall on golden pairs · projected G4 ≤ 5%. NO-GO → swap roster rows and re-run replay (architecture unchanged).
+
+   *Built VA-97 (2026-07-19):* `scripts/export_replay_corpus.py` (Firestore → JSONL, with an `--inspect` pass that reports the collection's real field names before exporting, because `stage3_edges` is vishwamitra's and only the fields **this** document adds to it are pinned here) and `scripts/replay_bakeoff.py`. The bake-off scores each artifact over the corpus **once**, caches the raw probabilities, and replays the cached numbers through `gatekeeper.gates.decisions` — the same functions sessions 04‑06 wrap in worker plumbing — so a few hundred threshold combinations cost seconds against the hours of inference behind them.
+
+2. **GO bar (owner signs at the report; a calibration bar, not a build gate):** NEUTRAL precision ≥ 0.95 at ≥ 60% coverage · CONTRADICTS recall ≥ 95% of the ensemble's own recall on golden pairs · projected G4 ≤ 5%. NO-GO → swap roster rows and re-run replay (architecture unchanged — and now a config swap, §8).
+
+   **The contradiction criterion is unmeasurable on the corpus exported so far.** Those 12,208 pairs (the 209-claim reference subject) contain **zero golden pairs and zero CONTRADICTS verdicts** — that vishwamitra run judged every pair bare, so `withContext=true` is absent too and the ensemble never returned a contradiction. The recall criterion has an empty denominator and is reported **unmeasurable**, not passed (`goBar.unmeasurable` in the archived report); on this corpus the bar reduces to NEUTRAL precision/coverage + projected G4 volume + escape-hatch mechanics. Closing O‑2 needs a second corpus from an intake whose ensemble did return CONTRADICTS (DEFERRED-LIVE 17). Until then the escape hatch and the G3 cross-check are exercised only by unit tests, never by real contradicting claims.
+
+   Three readings the bar needed, now fixed in `gatekeeper/replay/metrics.py`: escalating never counts against **precision** (a deferred pair was not judged wrongly, only deferred); NEUTRAL **coverage** is over the whole corpus, not over the pairs G1 happened to reach; and CONTRADICTS **recall** means *did not discard* — the cascade never finalizes CONTRADICTS, so the only failure is a golden contradiction decided as NEUTRAL/REPEATS/CORROBORATES instead of reaching a human or the LLM tail.
+
+   **Search the thresholds jointly, not one at a time.** They gate each other: with `contraEscape` at its proposed 0.02 the escape hatch flags a pair before `neutralMin` is ever consulted, so a one-axis sweep of `neutralMin` returns a flat curve that says nothing. Use `--grid`; the best passing cell becomes the adopted thresholds.
+
+   **Early signal on `contraEscape` (2026-07-19, 14 hand-written pairs — indicative only, not evidence).** The proposed 0.02 flagged 7 of 8 genuinely-neutral pairs, while true contradictions scored 0.985–0.9997. The separation between the two populations is wide, and the proposed threshold sits far below it. Expect the real corpus to move `contraEscape` up by roughly an order of magnitude; it is likely the single most consequential number in this document, since it drives both G1 coverage and G4 volume.
 3. **SHADOW** on the next real run → disagreement report must match replay-predicted rates.
 4. **Flip** to `GATEKEEPER`. Rollback = set `JudgeMode = LLM` (one config value; the ensemble path is untouched by this entire design).
 
@@ -443,7 +484,7 @@ Publish failures: bounded retry with backoff; terminal publish failure surfaces 
 | G4_ESCALATION | 278 | 265 by flash-lite (~$0.30) | 13 → HUMAN |
 | **Totals** | | **encoders 97.2% · LLM 2.2% · human 0.6% (73 pairs)** | |
 
-Cost ≈ **$0.30 LLM + ~$0.50 CPU ≈ $0.80** vs $48.83 today (61×). Wall-clock ≈ 25–35 min (G1 ~10 min at ~40 pairs/s dual-pass, G2 ~5 min, G3+G4+finalize ~10 min). A 1,000-claim intake under the B2 cap (~35–40k pairs) scales linearly: ~$2–4, ~1.5–2.5 h single worker — far inside the 24 h job ceiling, parallelizable via N job tasks if ever needed.
+Cost ≈ **$0.30 LLM + ~$0.50 CPU ≈ $0.80** vs $48.83 today (61×). Wall-clock ≈ 25–35 min (G1 ~10 min at ~40 pairs/s dual-pass, G2 ~5 min, G3+G4+finalize ~10 min). A 1,000-claim intake under the B2 cap (~35–40k pairs) scales linearly: ~$2–4, ~1.5–2.5 h single worker — far inside the 24 h job ceiling, parallelizable via N job tasks if ever needed. **These estimates assume INT8 artifacts and are optimistic by roughly 2.5–4× while every row ships fp32 (§8, O‑6).**
 
 **Figure 4 — the cascade funnel on the reference subject** *(mermaid source — wrap with the diagram plugin):*
 
@@ -467,11 +508,13 @@ flowchart TD
 
 | # | Item | Owner | Lands |
 | --- | --- | --- | --- |
-| O‑1 | Real thresholds + final roster (~~may swap G2 → FactCG if checkpoint verifies~~ — **checkpoint verified 2026-07-19**, `yaxili96/FactCG-DeBERTa-v3-Large`; the swap is now purely an LK‑5 numbers question) | LK‑5 report → owner sign-off | configSnapshot defaults |
-| O‑2 | CONTRADICTS-recall tolerance number | owner | §15 GO bar |
+| O‑1 | Real thresholds + final roster (~~may swap G2 → FactCG if checkpoint verifies~~ — **checkpoint verified 2026-07-19**, `yaxili96/FactCG-DeBERTa-v3-Large`; the swap is now purely an LK‑5 numbers question). **OPEN, and no longer blocking:** calibration is decoupled from the build (§15), sessions 04–06 ship on the v1 defaults, and adopting the winner is a config change. Resume from the 4/7 score cache — DEFERRED-LIVE 18–19. | LK‑5 report → owner sign-off | configSnapshot defaults |
+| O‑2 | CONTRADICTS-recall tolerance number. **OPEN and currently unmeasurable** — the exported corpus holds zero golden pairs and zero CONTRADICTS verdicts (§15 step 2), so this needs a second corpus first: DEFERRED-LIVE 17. | owner | §15 GO bar |
 | O‑3 | G4 prompt: exact reuse/trim of the existing judge prompt family | LK‑10 | prompt registry |
 | O‑4 | ~~Region pin + notification-channel id~~ **CLOSED 2026-07-19** — region `asia-southeast1` (vishwamitra-infra's default, and where Firestore and the buckets already are); **no channel minted**, the alert policies read `notification_channel_ids` out of vishwamitra-infra's state via the remote-state data source | owner (infra vars) | lakshmana-infra tfvars |
 | O‑5 | `PLAN-stage3-cost-cut.md` Workstream C: mark superseded by this LLD | ~~next vishwamitra session~~ **DONE 2026-07-19** (plan doc + cost wiki v1.3) | plan doc |
+| O‑6 | **INT8 is not usable as exported** — all seven checkpoints failed the sanity diff and ship fp32 (§8). Either accept fp32 (larger artifacts, slower CPU inference, §16 estimates optimistic by 2.5–4×) or land a better quantization: static/calibrated INT8, or per-op exclusions for the layers that drift. | owner, after the LK‑5 report | roster + §16 estimates |
+| O‑7 | ~~The replay corpus was unreachable in session03~~ **CLOSED 2026-07-19** — the corpus was exported (12,208 pairs, `var/replay/corpus.jsonl`) and 4 of 7 artifacts scored before the owner stopped the run. What remains is calibration, not access: it is O‑1/O‑2 plus DEFERRED-LIVE 17–19, not a separate open item. | — | — |
 
 ## References
 

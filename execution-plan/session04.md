@@ -1,6 +1,7 @@
 # session04 — dispatcher + G1 (VA-98, VA-99)
 
-> Repo: lakshmana-core · Blocked by: **session03 GO** (thresholds signed) + session02 infra applied.
+> Repo: lakshmana-core · Blocked by: nothing. ~~session03 GO (thresholds signed)~~ — **the GO gate was removed by owner directive 2026-07-19**; build against §8's v1 roster defaults, which are already the shipped config. Calibration lands later as a config change (DEFERRED-LIVE 17–19). session02 infra apply is deferred-live and does not block local work.
+> **Read the model from the run, not from config:** `GateBinding.from_snapshot(run.config_snapshot, gate)` — see the freeze invariant in LLD §8 and `tests/test_freeze_invariant.py`.
 > LLD: §4 architecture · §5 protocol · §6 claim rules · §8 G1 · §10 purge — page 255688733.
 
 ## Scope
@@ -21,5 +22,5 @@
 
 - [ ] Duplicate/stale no-op integration tests; sweep rescues a synthetic expired lease exactly once
 - [ ] Escape-hatch property test: no contradiction-signal pair is ever neutral-discarded
-- [ ] Replay parity: gate-loop output ≡ session03 harness on same corpus + thresholds; crash mid-batch resumes cleanly
+- [ ] Replay parity: gate-loop output ≡ the VA-97 harness (`gatekeeper/replay/`) on the same corpus + thresholds — both must drive `gatekeeper/gates/decisions.py`, so parity is a wiring check, not a numbers check; crash mid-batch resumes cleanly
 - [ ] VA-98, VA-99 → In Review; handoff ritual; delete this file

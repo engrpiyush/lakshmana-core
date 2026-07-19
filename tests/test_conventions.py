@@ -95,7 +95,15 @@ def test_config_snapshot_matches_the_lld_shape() -> None:
         "supportFloor",
         "groundingMode",
     }
-    assert set(snapshot["g3"]) == {"model", "sha256", "contraMin", "agreementRule"}
+    # `neutralConsensus` is named in §8's decide_g3 pseudocode but was never given a key
+    # or a proposed value; VA-97 added it as a proposal like the rest of §8's numbers.
+    assert set(snapshot["g3"]) == {
+        "model",
+        "sha256",
+        "contraMin",
+        "neutralConsensus",
+        "agreementRule",
+    }
     assert set(snapshot["g4"]) == {"llmModel", "maxLlmPairs", "thinkingBudget"}
 
 

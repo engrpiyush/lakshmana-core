@@ -28,6 +28,9 @@ from gatekeeper.models.manifest import (
     REQUIRED_FILES,
     Manifest,
     ManifestFile,
+    Precision,
+    SanityGate,
+    SanityReport,
     canonical_bytes,
     sha256_bytes,
 )
@@ -62,16 +65,29 @@ class FakeBlobStore:
         destination.write_bytes(self.read_bytes(object_path))
 
 
+PASSING_GATE = SanityGate(max_mean_abs_diff=0.02, max_abs_diff=0.15, min_label_agreement=0.98)
+
+
 def build_artifact_objects(
     prefix: str = "modernbert-base-nli/v1",
     *,
     payloads: dict[str, bytes] | None = None,
+    precision: Precision = Precision.INT8,
+    sanity: SanityReport | None = None,
 ) -> tuple[dict[str, bytes], Manifest]:
-    """A complete, self-consistent artifact: three files plus a matching manifest."""
-    content = payloads or {
+    """A complete, self-consistent artifact: both precisions plus a matching manifest.
+
+    The fp32 bytes are deliberately distinct from the INT8 ones so that "the loader
+    fetched the shipping precision" is an observable fact rather than an assumption.
+    """
+    int8_content = payloads or {
         "model.onnx": b"onnx-graph-bytes",
         "tokenizer.json": b'{"tokenizer": true}',
         "config.json": b'{"config": true}',
+    }
+    content: dict[Precision, dict[str, bytes]] = {
+        Precision.INT8: int8_content,
+        Precision.FP32: {name: b"fp32-" + body for name, body in int8_content.items()},
     }
     manifest = Manifest(
         schema_version=MANIFEST_SCHEMA_VERSION,
@@ -82,13 +98,29 @@ def build_artifact_objects(
         task=ModelTask.NLI_3WAY.value,
         quantization="dynamic-int8-avx512-vnni-per-channel",
         exported_at="2026-07-19T00:00:00Z",
-        files={
-            name: ManifestFile(sha256=sha256_bytes(body), bytes_=len(body))
-            for name, body in content.items()
+        precision=precision,
+        precisions={
+            each: {
+                name: ManifestFile(sha256=sha256_bytes(body), bytes_=len(body))
+                for name, body in bodies.items()
+            }
+            for each, bodies in content.items()
         },
+        sanity=sanity
+        or SanityReport(
+            pairs=50,
+            mean_abs_diff=0.004,
+            max_abs_diff=0.06,
+            label_agreement=1.0,
+            gate=PASSING_GATE,
+        ),
         opset=17,
     )
-    objects = {f"{prefix}/{name}": body for name, body in content.items()}
+    objects = {
+        f"{prefix}/{each}/{name}": body
+        for each, bodies in content.items()
+        for name, body in bodies.items()
+    }
     objects[f"{prefix}/{MANIFEST_FILENAME}"] = manifest.canonical()
     return objects, manifest
 
@@ -182,9 +214,73 @@ def test_manifest_rejects_an_unknown_schema_version() -> None:
 def test_manifest_rejects_a_missing_required_file() -> None:
     _, manifest = build_artifact_objects()
     document = manifest.to_json()
-    del document["files"]["tokenizer.json"]
+    del document["precisions"]["int8"]["tokenizer.json"]
     with pytest.raises(ValueError, match="missing required files"):
         Manifest.from_json(document)
+
+
+def test_manifest_rejects_shipping_a_precision_it_does_not_mirror() -> None:
+    """The one inconsistency that would make the loader fetch nothing at all."""
+    _, manifest = build_artifact_objects()
+    document = manifest.to_json()
+    del document["precisions"]["int8"]
+    with pytest.raises(ValueError, match="ships int8 but mirrors only"):
+        Manifest.from_json(document)
+
+
+def test_manifest_rejects_an_unknown_precision() -> None:
+    _, manifest = build_artifact_objects()
+    document = manifest.to_json()
+    document["precisions"]["bfloat16"] = document["precisions"]["int8"]
+    with pytest.raises(ValueError, match="malformed manifest"):
+        Manifest.from_json(document)
+
+
+def test_the_digest_covers_the_shipping_precision() -> None:
+    """Demoting int8 to fp32 must break the config pin — it changes which bytes run."""
+    _, shipping_int8 = build_artifact_objects(precision=Precision.INT8)
+    _, shipping_fp32 = build_artifact_objects(precision=Precision.FP32)
+    assert shipping_int8.digest() != shipping_fp32.digest()
+
+
+def test_the_digest_covers_the_recorded_sanity_numbers() -> None:
+    """An auditor reading a six-month-old run doc must be able to trust the demotion."""
+    _, honest = build_artifact_objects()
+    _, rewritten = build_artifact_objects(
+        sanity=SanityReport(
+            pairs=50,
+            mean_abs_diff=0.9,
+            max_abs_diff=0.9,
+            label_agreement=0.1,
+            gate=PASSING_GATE,
+        )
+    )
+    assert honest.digest() != rewritten.digest()
+
+
+def test_a_failing_sanity_report_knows_which_criteria_it_missed() -> None:
+    report = SanityReport(
+        pairs=50,
+        mean_abs_diff=0.155,
+        max_abs_diff=0.94,
+        label_agreement=0.84,
+        gate=PASSING_GATE,
+    )
+    assert not report.passed
+    assert len(report.failures()) == 3
+
+
+def test_a_report_that_only_drifts_on_one_axis_says_so() -> None:
+    """VitaminC's shape: labels all survive, the probabilities move too far anyway."""
+    report = SanityReport(
+        pairs=50,
+        mean_abs_diff=0.001,
+        max_abs_diff=0.23,
+        label_agreement=1.0,
+        gate=PASSING_GATE,
+    )
+    assert not report.passed
+    assert report.failures() == ("max |Δp| 0.2300 > 0.15",)
 
 
 def test_manifest_digest_changes_when_any_file_digest_changes() -> None:
@@ -213,7 +309,48 @@ def test_load_verifies_and_caches(tmp_path: Path) -> None:
     assert artifact.model_path.read_bytes() == b"onnx-graph-bytes"
     assert artifact.tokenizer_path.is_file() and artifact.config_path.is_file()
     assert artifact.manifest.source_revision == "0" * 40
+    assert artifact.precision is Precision.INT8
     assert len(store.downloads) == len(REQUIRED_FILES)
+
+
+def test_a_demoted_artifact_loads_its_fp32_graph(tmp_path: Path) -> None:
+    """The whole point of the policy: an INT8 that failed the diff never reaches a gate."""
+    objects, manifest = build_artifact_objects(precision=Precision.FP32)
+    store = FakeBlobStore(objects)
+    loader = ModelLoader(store, cache_dir=tmp_path)
+
+    artifact = loader.load("modernbert-base-nli@v1", expected_manifest_sha256=manifest.digest())
+
+    assert artifact.precision is Precision.FP32
+    assert artifact.model_path.read_bytes() == b"fp32-onnx-graph-bytes"
+    assert all("/int8/" not in path for path in store.downloads)
+
+
+def test_the_unshipped_precision_is_never_downloaded(tmp_path: Path) -> None:
+    """Both precisions are mirrored; paying to fetch the one that will not run is waste."""
+    objects, manifest = build_artifact_objects()
+    store = FakeBlobStore(objects)
+
+    ModelLoader(store, cache_dir=tmp_path).load(
+        "modernbert-base-nli@v1", expected_manifest_sha256=manifest.digest()
+    )
+
+    assert store.downloads and all("/fp32/" not in path for path in store.downloads)
+
+
+def test_a_re_mirror_that_demotes_the_precision_replaces_the_cache(tmp_path: Path) -> None:
+    """A better quantizer — or a stricter gate — must not leave stale bytes cached."""
+    int8_objects, int8_manifest = build_artifact_objects(precision=Precision.INT8)
+    ModelLoader(FakeBlobStore(int8_objects), cache_dir=tmp_path).load(
+        "modernbert-base-nli@v1", expected_manifest_sha256=int8_manifest.digest()
+    )
+
+    fp32_objects, fp32_manifest = build_artifact_objects(precision=Precision.FP32)
+    artifact = ModelLoader(FakeBlobStore(fp32_objects), cache_dir=tmp_path).load(
+        "modernbert-base-nli@v1", expected_manifest_sha256=fp32_manifest.digest()
+    )
+
+    assert artifact.model_path.read_bytes() == b"fp32-onnx-graph-bytes"
 
 
 def test_a_second_load_is_memoized_in_process(tmp_path: Path) -> None:
@@ -275,7 +412,7 @@ def test_a_pinned_manifest_that_does_not_match_is_refused(tmp_path: Path) -> Non
 def test_a_tampered_model_file_is_refused(tmp_path: Path) -> None:
     """The manifest is honest, the object behind it is not — the second link in the chain."""
     objects, manifest = build_artifact_objects()
-    objects["modernbert-base-nli/v1/model.onnx"] = b"malicious-graph"
+    objects["modernbert-base-nli/v1/int8/model.onnx"] = b"malicious-graph"
     loader = ModelLoader(FakeBlobStore(objects), cache_dir=tmp_path)
 
     with pytest.raises(ModelFetchError, match="sha256 mismatch"):
@@ -284,7 +421,7 @@ def test_a_tampered_model_file_is_refused(tmp_path: Path) -> None:
 
 def test_a_refused_download_leaves_no_cache_directory(tmp_path: Path) -> None:
     objects, manifest = build_artifact_objects()
-    objects["modernbert-base-nli/v1/model.onnx"] = b"malicious-graph"
+    objects["modernbert-base-nli/v1/int8/model.onnx"] = b"malicious-graph"
     loader = ModelLoader(FakeBlobStore(objects), cache_dir=tmp_path)
 
     with pytest.raises(ModelFetchError):
@@ -302,7 +439,7 @@ def test_a_missing_manifest_is_a_fetch_error(tmp_path: Path) -> None:
 
 def test_a_file_listed_but_absent_is_a_fetch_error(tmp_path: Path) -> None:
     objects, manifest = build_artifact_objects()
-    del objects["modernbert-base-nli/v1/tokenizer.json"]
+    del objects["modernbert-base-nli/v1/int8/tokenizer.json"]
     loader = ModelLoader(FakeBlobStore(objects), cache_dir=tmp_path)
 
     with pytest.raises(ModelFetchError, match="absent from the bucket"):
@@ -385,7 +522,7 @@ def test_local_mode_verifies_exactly_like_gcs(tmp_path: Path) -> None:
 def test_local_mode_still_refuses_a_tampered_file(tmp_path: Path) -> None:
     mirror, cache = tmp_path / "mirror", tmp_path / "cache"
     manifest = _write_local_mirror(mirror)
-    (mirror / "modernbert-base-nli" / "v1" / "model.onnx").write_bytes(b"tampered-bytes!!")
+    (mirror / "modernbert-base-nli" / "v1" / "int8" / "model.onnx").write_bytes(b"tampered-bytes!")
     loader = ModelLoader(LocalBlobStore(mirror), cache_dir=cache)
 
     with pytest.raises(ModelFetchError, match="sha256 mismatch"):

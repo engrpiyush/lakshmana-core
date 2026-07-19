@@ -11,6 +11,13 @@ dependencies = [
     "neo4j>=5.26.0",
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.32.0",
+    # Inference. `tokenizers` is the Rust tokenizer behind a `tokenizer.json` — the same
+    # object transformers wraps, without transformers or torch. The runtime image needs
+    # exactly these two and none of the model-prep extra: it consumes exported graphs,
+    # it never produces them.
+    "onnxruntime>=1.20.0",
+    "tokenizers>=0.21.0",
+    "numpy>=2.1.0",
 ]
 
 [project.optional-dependencies]
@@ -24,6 +31,7 @@ model-prep = [
     "onnx>=1.17.0",
     "onnxruntime>=1.20.0",
     "torch>=2.5.0",
+    "sentencepiece>=0.2.2",
 ]
 
 [project.scripts]
@@ -53,12 +61,26 @@ select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF", "PL", "BLE"]
 ignore = ["PLR0911", "PLR0912", "PLR0913"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["PLR2004"]
+"tests/*" = ["PLR2004", "PLC0415"]
 # The lazy imports in these two are load-bearing, not sloppiness: `google-cloud-storage`
 # stays out of the test path, and the whole `model-prep` extra (torch, transformers,
 # optimum) must not be importable-at-module-scope or the runtime image would need it.
 "gatekeeper/models/loader.py" = ["PLC0415"]
 "scripts/prepare_models.py" = ["PLC0415"]
+# `onnxruntime` and `tokenizers` are hard runtime dependencies, not optional ones, but
+# importing them costs about a second and nothing that merely reads a decision function
+# or a metric needs them. The roster import is deferred to keep the scorer from importing
+# the catalogue that imports it.
+"gatekeeper/scoring/encoder.py" = ["PLC0415"]
+# The two model-driving scripts set GATEKEEPER_* in the environment before importing
+# anything that reads config, which is only possible after argument parsing.
+"scripts/probe_label_order.py" = ["PLC0415"]
+"scripts/replay_bakeoff.py" = ["PLC0415"]
+"scripts/export_replay_corpus.py" = ["PLC0415"]
+# The Firestore query builder is imported inside `stream_edges` so the rest of the module
+# — the field map, the record shape, the JSONL round trip — stays importable without the
+# SDK, which is what lets the exporter's logic be tested without an emulator.
+"gatekeeper/replay/corpus.py" = ["PLC0415"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

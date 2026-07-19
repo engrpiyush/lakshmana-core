@@ -12,6 +12,7 @@ from gatekeeper.models.loader import (
     GcsBlobStore,
     LocalBlobStore,
     ModelLoader,
+    artifact_for_binding,
     artifact_for_gate,
     loader_from_config,
 )
@@ -38,6 +39,7 @@ __all__ = [
     "ManifestFile",
     "ModelLoader",
     "RosterEntry",
+    "artifact_for_binding",
     "artifact_for_gate",
     "entry_for",
     "loader_from_config",

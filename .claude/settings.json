@@ -1,10 +1,14 @@
 {
   "model": "opus",
   "effortLevel": "xhigh",
+  "env": {
+    "FIRESTORE_EMULATOR_HOST": "127.0.0.1:8082"
+  },
   "permissions": {
     "defaultMode": "acceptEdits",
     "additionalDirectories": [
-      "/Users/piyushvishwakarma/workspace/vishwakarma-ai/lakshmana-infra"
+      "/Users/piyushvishwakarma/workspace/vishwakarma-ai/lakshmana-infra",
+      "/Users/piyushvishwakarma/workspace/vishwakarma-ai/vishwamitra-core"
     ],
     "allow": [
       "Bash(uv:*)",
@@ -53,6 +57,7 @@
       "mcp__claude_ai_Atlassian_Rovo__updateConfluencePage"
     ],
     "deny": [
+      "Edit(/Users/piyushvishwakarma/workspace/vishwakarma-ai/vishwamitra-core/**)",
       "Bash(git commit:*)",
       "Bash(git push:*)",
       "Bash(git reset:*)",

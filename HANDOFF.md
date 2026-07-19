@@ -1,103 +1,116 @@
-# HANDOFF — after session02 (VA-94, VA-96)
+# HANDOFF — after session03 (VA-97, the replay bake-off — rescoped and closed)
 
-> Date: 2026-07-19 · Repos: lakshmana-infra + lakshmana-core · LLD: page 255688733 **v1.2** (mirror synced)
-> Next session file: `execution-plan/session03.md` (VA-97 — the replay bake-off, the go/no-go)
-> Mode: **FINISH-ALL-CODE** (owner directive in CLAUDE.md, 2026-07-19). Nothing was parked;
-> everything needing live GCP went to `execution-plan/DEFERRED-LIVE.md` (items 9–14 added).
+> Date: 2026-07-19 · Repo: lakshmana-core · LLD: page 255688733 **v1.4** (mirror synced, page version 5)
+> Session file: `execution-plan/session03.md` — **deleted**, the session is complete.
+> VA-97 → **In Review** with scope notes on the ticket.
+> Mode: **FINISH-ALL-CODE**. Nothing is parked. The previous handoff parked the bake-off;
+> that parking is resolved — not by running it, but by the owner removing it as a gate.
 
-## What was built
+## The short version
 
-**VA-94 — lakshmana-infra Terraform (LK-2)**
+**Session03 no longer decides anything about models.** The owner stopped the full-corpus
+evaluation mid-run (it monopolised the machine) and rescoped the session: the GO bar is not
+a gate on sessions 04-06, model choice and threshold calibration happen later, and the
+build proceeds on the v1 roster defaults.
 
-A single flat root at `lakshmana-infra/terraform/` — there is not enough here to justify
-modules, and flat keeps the IAM matrix readable in one pass. Per LLD §13: topic +
-`gatekeeper-requests-push` (OIDC, 5-attempt DLQ) + DLQ topic and a `-dlq-pull` inspection
-subscription; three SAs and the full IAM matrix; versioned model bucket
-(`prevent_destroy`); dispatcher service (1 vCPU/512Mi, min 0, internal ingress) and
-worker job (4 vCPU/8Gi, 6 h, maxRetries 1, VPC connector for Neo4j); 15-minute sweep
-schedule; `gatekeeper-neo4j-ro` secret shell; 2 log-based metrics + 5 alert policies.
-README carries the `gatekeeper_ro` cypher and the stand-up runbook.
+So this closeout did three things: made model selection a pure config concern with the v1
+roster as the default, **closed a real hole in the freeze invariant**, and told the truth in
+the LLD and on the ticket about what was and was not measured. The harness, the 12,208-pair
+corpus and the 4-of-7 score cache are deliverables as they stand.
 
-**VA-96 — model prep + loader (LK-4)**
+## The bug worth knowing about
 
-`scripts/prepare_models.py`: HF → optimum ONNX fp32 → dynamic INT8 → 50-pair sanity diff
-→ local mirror → optional GCS. `gatekeeper/models/`: `roster.py` (v1 + 5 alternates),
-`manifest.py`, `loader.py`. Heavy deps sit in a `model-prep` extra so neither the runtime
-image nor CI carries torch.
+Thresholds were read from the run's frozen `configSnapshot`; **the model was read from live
+config.** `artifact_for_gate(loader, config, gate)` went straight to
+`gatekeeper.gates.g1.model`. An operator editing config between G1 and G3 — which is exactly
+what will happen once calibration resumes — would have split a run across two checkpoints
+while its thresholds stayed put. The run doc would have looked clean; the verdicts would
+have been unreproducible.
 
-## Decisions worth carrying forward
+Fixed by making the snapshot the only source for both:
 
-1. **The sha256 pin is a two-link chain.** Config's per-gate `sha256` pins the
-   *manifest's canonical bytes*; the manifest pins each file by digest and size. One
-   short value per gate therefore covers hundreds of MB transitively and still fits in
-   `configSnapshot` — so an auditor reading a six-month-old run doc can prove which bytes
-   produced its verdicts. Verifying the manifest *without* pinning it would be theatre:
-   anyone who can rewrite the model can rewrite the manifest beside it.
-2. **`sourceRevision` is a commit sha, never a branch.** `main` today and `main` next
-   month are different weights; a manifest that says "main" does not make a run
-   reproducible.
-3. **The loader's local-dir mode is the same code path, not a test seam.** LK-5 has to
-   measure the *production* loader before anything is in GCS. Digest verification is
-   identical in both modes; Terraform leaves the local override empty so a deployed
-   worker cannot silently fall back to a directory that happens to exist.
-4. **Cache hits are re-verified, not trusted via a stamp file.** Hashing half a gigabyte
-   costs about a second; being wrong about which weights produced a verdict costs a
-   re-run of the whole corpus. Downloads also stage into a temp dir and rename only after
-   every digest matches, so a killed task leaves no plausible-looking cache entry.
-5. **HHEM is refused, deliberately.** It ships as a `trust_remote_code` architecture that
-   optimum's sequence-classification path cannot export. A wrong-architecture INT8 model
-   does not crash — it returns confident, plausible, wrong probabilities, which here means
-   pairs silently discarded as NEUTRAL. The script stops instead. MiniCheck and FactCG
-   both cover G2, so VA-97 is unaffected.
-6. **The INT8 sanity diff gates on the mean, not just labels.** Label agreement hides
-   recalibration, and the gates read *probabilities* against thresholds, not argmax.
-   Tolerances: mean |Δp| ≤ 0.02, max |Δp| ≤ 0.15, label agreement ≥ 0.98.
-7. **Dead-lettering needs the Pub/Sub service agent bound on both sides** —
-   `pubsub.publisher` on the DLQ topic *and* `pubsub.subscriber` on the push subscription.
-   Miss either and the policy looks right in the console and never fires. Likewise the
-   dispatcher needs `iam.serviceAccountUser` on the worker SA to start the job at all.
-8. **Alert policies fail the plan when no channel resolves** (a `lifecycle.precondition`).
-   An alert nobody hears is the most likely silent failure of the remote-state wiring.
-9. **Images are `ignore_changes`d.** CI rolls them; without this every `terraform apply`
-   would revert the running revision to whatever tfvars last said.
+- `gatekeeper.config.GateBinding.from_snapshot(snapshot, gate)` — model, sha256 pin, and
+  token budget, resolved from `configSnapshot.g{1,2,3}`. The artifact-side companion to
+  `Thresholds.from_snapshot` on the numbers side. It lives in `config.py` because that plus
+  `enums.py` is the base layer — anywhere else and loader/encoder/decisions import-cycle.
+- `artifact_for_binding()` / `scorer_for_binding()` are the worker path. The old
+  `artifact_for_gate()` / `scorer_for_gate()` survive for tooling with no run doc (the
+  bake-off, the label probe) but now resolve **through** `config.snapshot()`, so they cannot
+  drift from what a real run would freeze.
+- Token budget is frozen too — truncation changes scores, so a run that started at 512
+  tokens must not finish at 256.
+- `tests/test_freeze_invariant.py` (10 tests) proves it from three sides: resolution beats
+  live config, the loader fetches the frozen artifact, and a FROM_GATE resume keeps the
+  original snapshot while FROM_START picks up the new one.
+
+The store side was already correct (`claim_gate` ignores the passed snapshot on an existing
+run) and had a test; it was only the resolution half that leaked.
+
+## Also delivered this session
+
+- **Per-gate model selection by config alone.** `configSnapshot.g{1,2,3}.model` defaults to
+  the v1 roster, thresholds to the LLD §8 proposals. Adopting a bake-off winner is a config
+  change, never a code change — that was the owner's explicit requirement.
+- **LLD v1.4**, mirror and page 255688733 together: §8 gained the config-selection rule and
+  the freeze invariant; §15 gained the decoupling notice and the honest statement about the
+  unmeasurable contradiction criterion; O-1/O-2 rescoped as open-but-not-blocking; **O-7
+  closed** (the corpus was exported — access was never the remaining problem, calibration
+  is).
+
+## What was deliberately NOT done
+
+- **No roster chosen, no thresholds calibrated.** O-1 open. Do not read the v1 defaults as
+  a decision — they are the LLD's proposals, unchanged.
+- **The remaining 3 artifacts were not scored.** The session file says so explicitly.
+  `var/replay/scores/` holds minicheck-L, nli-deberta-small, deberta-mnli-fever-anli and
+  ettinx; missing are modernbert, vitaminc, factcg. The grid search after them is seconds.
+- **The GO bar's CONTRADICTS-recall criterion is unmeasurable on this corpus** — zero golden
+  pairs, zero CONTRADICTS verdicts, and `withContext=0` (that vishwamitra run judged every
+  pair bare). It is reported `goBar.unmeasurable`, never as a pass. Closing O-2 needs a
+  second corpus from an intake whose ensemble actually contradicted something.
+
+## Findings carried forward from the earlier part of this session
+
+1. **INT8 is unusable as exported.** All 7 checkpoints failed: mean |Δp| 0.015-0.155, max
+   0.23-0.94, agreement 84-98%. Everything ships fp32. Artifacts are 2.5-4× larger than
+   §8's table and §16's wall-clock/memory numbers are optimistic by about the same. **O-6.**
+   Worth flagging: the worker job's 8 GB ceiling wants re-checking against the 1.66 GB
+   artifacts before the first real run.
+2. **`contraEscape = 0.02` is probably wrong by an order of magnitude.** On 14 hand-written
+   probe pairs it flagged 7 of 8 genuinely-neutral pairs while true contradictions scored
+   0.985-0.9997. Fourteen pairs is not evidence and no value is proposed — but it is why the
+   harness has a joint `--grid` search: at 0.02 the escape hatch fires before `neutralMin`
+   is consulted, so one-axis sweeps return a flat curve.
+3. **`ettinx-nli-s` ships unnamed `LABEL_0/1/2`** with a self-contradictory model card.
+   Resolved empirically (98% agreement, 62-point margin) and recorded on the roster entry.
+4. **FactCG separates weakly** — 0.44-0.85 on probe pairs where MiniCheck gives 0.011-0.977.
+   A real signal about it as a G2 candidate, for the bake-off to quantify.
 
 ## State
 
-| Check | Result |
-| --- | --- |
-| `ruff check .` / `ruff format --check .` | clean · 37 files |
-| `pytest` (emulator-backed) | **184 passed, 0 skipped** (was 125; +59) |
-| Docker images | dispatcher + worker both build |
-| Local-stack smoke | loader local-dir → G1 artifact · memoization · disk cache · tampered file → `GK_E_MODEL_FETCH` · wrong pin refused · Neo4j 7687 + emulator 8082 reachable |
-| Golden fixtures | regeneration is a no-op |
-| `terraform fmt -check -recursive` | clean |
-| `terraform validate` | **NOT RUN** — needs `terraform init`, which is not allow-listed (see below) |
-| LLD | synced to **v1.2**, mirror + Confluence together |
-| VA-94, VA-96 | **In Review**, each with a comment listing the un-met acceptance criteria |
+- **306 tests green** (was 289), 52 of them emulator-backed, 0 skipped. Ruff check + format
+  clean. Both images build.
+- Emulator 8082 and Neo4j both up. The backup was **never** imported into 8082 — the export
+  used a throwaway instance, since torn down.
+- `var/` is gitignored: `var/models/` (~7.7 GB, both precisions), `var/model-prep/` (scratch
+  exports, retained — they make a re-mirror free), `var/model-cache/`, `var/replay/`
+  (corpus + the 4 cached score files).
+- The `neo4j` pytest marker currently selects 0 tests; the Neo4j reader is covered by fakes.
+  Not a regression, just worth knowing the marker proves nothing today.
+- Nothing committed. Commit message printed in chat.
 
-Still uncommitted on top of `afe921c`. Note: the session01 files were `git add`-ed at some
-point outside this session — left exactly as found, nothing staged or unstaged by me.
+## What is next
 
-## The one thing worth fixing before session03
+1. **session04** (VA-98/VA-99, dispatcher + G1). It is no longer gated on anything — build
+   against the v1 defaults. Wrap `gatekeeper/gates/decisions.py`, do not reimplement it;
+   read the gate's artifact via `GateBinding.from_snapshot(run.config_snapshot, gate)`, never
+   from live config.
+2. **Calibration, whenever the owner wants the machine for it** — DEFERRED-LIVE 17-19.
+   Item 19 resumes the bake-off from the score cache; item 17 exports the second corpus that
+   O-2 needs; item 18 mirrors every artifact to the bucket.
+3. **Pin the artifact shas** (DEFERRED-LIVE 16) once a roster is final — not before, since a
+   demotion or re-quantization changes the manifest digest. Until then every load logs
+   "artifact is not pinned".
 
-**`terraform validate` never ran.** `terraform init` (provider download — not
-infra-mutating) is absent from `.claude/settings.json`'s allow-list, so a headless session
-cannot self-verify the TF root; its schema correctness is currently reviewed-by-eye.
-Recommend adding `Bash(terraform init:*)` — `apply`/`destroy`/`import` stay denied.
-
-## What's next — session03 (VA-97), the go/no-go
-
-The bake-off. Two substitutions the FINISH-ALL-CODE directive already pins:
-
-- **Models** come from the local mirror, not GCS. Run
-  `uv run --extra model-prep python scripts/prepare_models.py --roster all` first — it
-  populates `var/models/` and prints the manifest shas to pin. Then point the harness at
-  it with `GATEKEEPER_MODELS_LOCAL_DIR=var/models`.
-- **Corpus** comes from the newest `../vishwamitra-core/var/firestore-backups/` snapshot
-  restored into a **separate emulator you start yourself** (e.g. 8092). **Never import
-  into the running 8082 emulator** — it holds the owner's live dev state.
-- **GO handling:** apply LLD §15's bar mechanically, adopt the best passing
-  roster + thresholds, archive the report for async review. Park only if *no* roster passes.
-
-Gates are still stubbed (`no_op_gate`, zero `seen` counter). Nothing gate-shaped gets
-built before session03's numbers clear.
+Session07 (VA-106, vishwamitra-side integration) remains independent and can be pulled
+forward at any time.

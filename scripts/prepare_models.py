@@ -11,7 +11,16 @@ The step that earns its keep is the sanity diff. Dynamic INT8 quantization is no
 value-preserving, and a quantized encoder that has quietly lost its calibration does not
 crash — it returns confident, plausible, wrong probabilities, which in this system means
 pairs silently discarded as NEUTRAL. So every export is scored against its own fp32
-parent on a fixed 50-pair fixture before it is allowed near the bucket.
+parent on a fixed 50-pair fixture.
+
+What the diff *decides* is which precision ships, not whether the artifact exists. Both
+precisions are mirrored; INT8 becomes the shipping graph only by clearing the gate, and
+otherwise fp32 ships and the failing numbers are recorded in the manifest. The first pass
+over this roster demoted every row, which is a real finding about dynamic quantization on
+these architectures rather than a reason to have no artifacts: the bake-off needs to score
+candidates on the precision they would actually run at, and refusing the export left it
+with nothing to score. Re-running after a better quantizer lands re-decides each row
+without re-downloading anything.
 
 Usage::
 
@@ -30,7 +39,6 @@ import json
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -43,6 +51,9 @@ from gatekeeper.models.manifest import (
     REQUIRED_FILES,
     Manifest,
     ManifestFile,
+    Precision,
+    SanityGate,
+    SanityReport,
     sha256_file,
 )
 from gatekeeper.models.roster import (
@@ -90,29 +101,6 @@ class PrepError(RuntimeError):
     """Anything that should stop a mirror run with a legible message."""
 
 
-@dataclass(slots=True)
-class SanityReport:
-    """The fp32-vs-INT8 comparison for one artifact."""
-
-    pairs: int
-    mean_abs_diff: float
-    max_abs_diff: float
-    label_agreement: float
-
-    def passed(self, args: argparse.Namespace) -> bool:
-        return (
-            self.mean_abs_diff <= args.max_mean_abs_diff
-            and self.max_abs_diff <= args.max_abs_diff
-            and self.label_agreement >= args.min_label_agreement
-        )
-
-    def describe(self) -> str:
-        return (
-            f"{self.pairs} pairs · mean |Δp| {self.mean_abs_diff:.4f} · "
-            f"max |Δp| {self.max_abs_diff:.4f} · label agreement {self.label_agreement:.2%}"
-        )
-
-
 # --- steps ------------------------------------------------------------------------------
 
 
@@ -130,10 +118,40 @@ def resolve_revision(entry: RosterEntry, requested: str | None) -> str:
     return str(info.sha)
 
 
+def onnx_graph_in(directory: Path) -> Path | None:
+    """The single ONNX graph in ``directory``, or None if it holds no export yet.
+
+    Raises:
+        PrepError: if more than one graph is present. The single-graph bucket layout
+            cannot represent an encoder-decoder split, and picking one arbitrarily would
+            mirror half a model.
+    """
+    graphs = sorted(directory.glob("*.onnx")) if directory.is_dir() else []
+    if not graphs:
+        return None
+    if len(graphs) > 1:
+        raise PrepError(
+            f"{directory} holds {len(graphs)} ONNX graphs "
+            f"({', '.join(graph.name for graph in graphs)}); the single-graph layout "
+            "cannot represent an encoder-decoder split."
+        )
+    return graphs[0]
+
+
 def export_fp32(entry: RosterEntry, revision: str, destination: Path) -> None:
-    """Export the checkpoint to ONNX at fp32, tokenizer and config alongside."""
+    """Export the checkpoint to ONNX at fp32, tokenizer and config alongside.
+
+    Idempotent: an export already sitting in ``destination`` is reused. Re-mirroring is a
+    normal operation — a sanity-gate change re-decides which precision ships without any
+    of the weights changing — and re-downloading gigabytes to reach the same graph is
+    pure cost.
+    """
     from optimum.onnxruntime import ORTModelForSequenceClassification
     from transformers import AutoTokenizer
+
+    if onnx_graph_in(destination) and (destination / "tokenizer.json").is_file():
+        print("  fp32 ONNX already exported, reusing it")
+        return
 
     print(f"  exporting fp32 ONNX (opset {ONNX_OPSET})…")
     model = ORTModelForSequenceClassification.from_pretrained(
@@ -152,9 +170,13 @@ def export_fp32(entry: RosterEntry, revision: str, destination: Path) -> None:
 
 
 def quantize_int8(source: Path, destination: Path) -> None:
-    """Dynamic INT8 quantization — no calibration set, weights only."""
+    """Dynamic INT8 quantization — no calibration set, weights only. Idempotent."""
     from optimum.onnxruntime import ORTQuantizer
     from optimum.onnxruntime.configuration import AutoQuantizationConfig
+
+    if onnx_graph_in(destination):
+        print("  INT8 graph already quantized, reusing it")
+        return
 
     print("  quantizing to dynamic INT8…")
     quantizer = ORTQuantizer.from_pretrained(source)
@@ -205,7 +227,11 @@ def _score(model_dir: Path, pairs: list[dict[str, str]], task: ModelTask) -> np.
 
 
 def sanity_diff(
-    fp32_dir: Path, int8_dir: Path, pairs: list[dict[str, str]], task: ModelTask
+    fp32_dir: Path,
+    int8_dir: Path,
+    pairs: list[dict[str, str]],
+    task: ModelTask,
+    gate: SanityGate,
 ) -> SanityReport:
     """Compare INT8 against its own fp32 parent — the gate on every export."""
     import numpy as np
@@ -232,40 +258,51 @@ def sanity_diff(
         mean_abs_diff=float(difference.mean()),
         max_abs_diff=float(difference.max()),
         label_agreement=agreement,
+        gate=gate,
     )
 
 
-def assemble(entry: RosterEntry, int8_dir: Path, fp32_dir: Path, staging: Path) -> None:
-    """Lay out exactly the four files the loader expects (LLD §13)."""
+def assemble_precision(source_dir: Path, fallback_dir: Path, staging: Path) -> None:
+    """Lay out exactly the three files the loader expects, for one precision (LLD §13).
+
+    ``fallback_dir`` covers the tokenizer and config: ``optimum``'s quantizer copies most
+    of the export directory but is not contractually obliged to, and the fp32 parent
+    always has them.
+    """
     staging.mkdir(parents=True, exist_ok=True)
 
-    onnx_files = sorted(int8_dir.glob("*.onnx"))
-    if not onnx_files:
-        raise PrepError(f"no .onnx produced in {int8_dir}")
-    if len(onnx_files) > 1:
-        raise PrepError(
-            f"{entry.ref} exported {len(onnx_files)} ONNX graphs "
-            f"({', '.join(f.name for f in onnx_files)}); the single-graph layout cannot "
-            "represent an encoder-decoder split."
-        )
-    shutil.copy2(onnx_files[0], staging / "model.onnx")
+    graph = onnx_graph_in(source_dir)
+    if graph is None:
+        raise PrepError(f"no .onnx produced in {source_dir}")
+    shutil.copy2(graph, staging / "model.onnx")
 
     for filename in ("tokenizer.json", "config.json"):
-        source = int8_dir / filename
+        source = source_dir / filename
         if not source.is_file():
-            source = fp32_dir / filename
+            source = fallback_dir / filename
         if not source.is_file():
-            raise PrepError(f"{filename} missing from both {int8_dir} and {fp32_dir}")
+            raise PrepError(f"{filename} missing from both {source_dir} and {fallback_dir}")
         shutil.copy2(source, staging / filename)
 
 
-def build_manifest(entry: RosterEntry, revision: str, staging: Path) -> Manifest:
-    files = {
+def digests_for(directory: Path) -> dict[str, ManifestFile]:
+    return {
         name: ManifestFile(
-            sha256=sha256_file(staging / name), bytes_=(staging / name).stat().st_size
+            sha256=sha256_file(directory / name), bytes_=(directory / name).stat().st_size
         )
         for name in REQUIRED_FILES
     }
+
+
+def build_manifest(
+    entry: RosterEntry,
+    revision: str,
+    staging: Path,
+    *,
+    precision: Precision,
+    mirrored: tuple[Precision, ...],
+    sanity: SanityReport | None,
+) -> Manifest:
     return Manifest(
         schema_version=MANIFEST_SCHEMA_VERSION,
         name=entry.name,
@@ -275,21 +312,33 @@ def build_manifest(entry: RosterEntry, revision: str, staging: Path) -> Manifest
         task=entry.task.value,
         quantization="dynamic-int8-avx512-vnni-per-channel",
         exported_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-        files=files,
+        precision=precision,
+        precisions={each: digests_for(staging / str(each)) for each in mirrored},
+        sanity=sanity,
         opset=ONNX_OPSET,
     )
 
 
-def upload(entry: RosterEntry, staging: Path, bucket: str) -> None:
-    """Copy the four files to ``gs://<bucket>/<name>/<version>/``.
+def relative_payload(manifest: Manifest) -> list[str]:
+    """Every mirrored file, manifest last.
+
+    The manifest goes **last** everywhere — until it exists, the loader treats the prefix
+    as absent, so a half-finished publish is invisible rather than corrupt.
+    """
+    return [
+        f"{precision}/{name}"
+        for precision in sorted(manifest.precisions)
+        for name in REQUIRED_FILES
+    ] + [MANIFEST_FILENAME]
+
+
+def upload(entry: RosterEntry, staging: Path, manifest: Manifest, bucket: str) -> None:
+    """Copy the mirrored files to ``gs://<bucket>/<name>/<version>/<precision>/``.
 
     Shells out to ``gcloud storage`` rather than pulling in the SDK: this script already
     carries a heavy optional dependency set, and the owner running it is authenticated.
-    The manifest goes **last** — until it exists, the loader treats the prefix as absent,
-    so a half-finished upload is invisible rather than corrupt.
     """
-    ordered = [name for name in REQUIRED_FILES] + [MANIFEST_FILENAME]
-    for name in ordered:
+    for name in relative_payload(manifest):
         target = f"gs://{bucket}/{entry.prefix}/{name}"
         print(f"  → {target}")
         result = subprocess.run(
@@ -302,18 +351,18 @@ def upload(entry: RosterEntry, staging: Path, bucket: str) -> None:
             raise PrepError(f"upload of {name} failed: {result.stderr.strip()}")
 
 
-def mirror_locally(entry: RosterEntry, staging: Path, local_dir: Path) -> Path:
+def mirror_locally(entry: RosterEntry, staging: Path, manifest: Manifest, local_dir: Path) -> Path:
     """Publish into the local mirror the loader's local-dir mode reads.
 
     Same layout as the bucket, so ``GATEKEEPER_MODELS_LOCAL_DIR`` is a drop-in for
     ``GATEKEEPER_MODELS_BUCKET`` and the replay bake-off exercises the production loader
-    rather than a test seam. The manifest is written last, matching the upload order:
-    until it exists the loader treats the prefix as absent.
+    rather than a test seam.
     """
     destination = local_dir / entry.prefix
-    destination.mkdir(parents=True, exist_ok=True)
-    for name in (*REQUIRED_FILES, MANIFEST_FILENAME):
-        shutil.copy2(staging / name, destination / name)
+    for name in relative_payload(manifest):
+        target = destination / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(staging / name, target)
     print(f"  local mirror → {destination}")
     return destination
 
@@ -340,29 +389,63 @@ def prepare_one(entry: RosterEntry, args: argparse.Namespace) -> Manifest:
     print(f"  pinned revision {revision}")
 
     export_fp32(entry, revision, fp32_dir)
-    quantize_int8(fp32_dir, int8_dir)
 
-    pairs = load_sanity_pairs(args.sanity_pairs, args.pairs)
-    report = sanity_diff(fp32_dir, int8_dir, pairs, entry.task)
-    print(f"  sanity: {report.describe()}")
-    if not report.passed(args):
-        raise PrepError(
-            f"{entry.ref} failed the INT8 sanity diff ({report.describe()}). "
-            "The export is not trustworthy — do not mirror it."
+    # fp32 always ships if nothing better does, so a quantization that cannot even be
+    # produced demotes the artifact rather than losing it. The alternates exist to be
+    # swept; an unmirrored one cannot be.
+    mirrored: list[Precision] = [Precision.FP32]
+    report: SanityReport | None = None
+    try:
+        quantize_int8(fp32_dir, int8_dir)
+        mirrored.append(Precision.INT8)
+    except Exception as exc:  # noqa: BLE001 — any quantizer failure means "no INT8"
+        print(f"  INT8 quantization failed ({exc}); mirroring fp32 only", file=sys.stderr)
+
+    precision = Precision.FP32
+    if Precision.INT8 in mirrored:
+        pairs = load_sanity_pairs(args.sanity_pairs, args.pairs)
+        gate = SanityGate(
+            max_mean_abs_diff=args.max_mean_abs_diff,
+            max_abs_diff=args.max_abs_diff,
+            min_label_agreement=args.min_label_agreement,
         )
+        report = sanity_diff(fp32_dir, int8_dir, pairs, entry.task, gate)
+        print(f"  sanity: {report.describe()}")
+        if report.passed:
+            precision = Precision.INT8
+            print("  INT8 cleared the sanity gate → INT8 ships")
+        else:
+            # Not a refusal any more: the artifact is still mirrored and still sweepable,
+            # it just ships the precision that has not been shown to drift. The failing
+            # numbers ride along in the manifest so the demotion stays auditable, and
+            # re-running with a better quantizer re-decides this without a re-download.
+            print(f"  INT8 missed the sanity gate ({'; '.join(report.failures())}) → fp32 ships")
 
-    assemble(entry, int8_dir, fp32_dir, staging)
-    manifest = build_manifest(entry, revision, staging)
+    for each in mirrored:
+        source = fp32_dir if each is Precision.FP32 else int8_dir
+        assemble_precision(source, fp32_dir, staging / str(each))
+
+    manifest = build_manifest(
+        entry,
+        revision,
+        staging,
+        precision=precision,
+        mirrored=tuple(mirrored),
+        sanity=report,
+    )
     (staging / MANIFEST_FILENAME).write_bytes(manifest.canonical())
 
-    size_mb = (staging / "model.onnx").stat().st_size / 1_048_576
-    print(f"  model.onnx {size_mb:.1f} MB (roster estimate {entry.approx_int8_mb} MB)")
+    shipping_mb = manifest.shipping_files["model.onnx"].bytes_ / 1_048_576
+    print(
+        f"  shipping {precision} model.onnx {shipping_mb:.1f} MB "
+        f"(roster INT8 estimate {entry.approx_int8_mb} MB)"
+    )
 
-    mirror_locally(entry, staging, Path(args.local_dir))
+    mirror_locally(entry, staging, manifest, Path(args.local_dir))
     if args.no_upload:
         print("  --no-upload: GCS upload deferred (execution-plan/DEFERRED-LIVE.md item 2)")
     else:
-        upload(entry, staging, args.bucket)
+        upload(entry, staging, manifest, args.bucket)
 
     print(f"  manifest sha256 {manifest.digest()}")
     return manifest
@@ -441,9 +524,17 @@ def main(argv: list[str] | None = None) -> int:
 
     print("\n=== summary ===")
     for entry, manifest in mirrored:
-        print(f"  OK      {entry.ref:28} {manifest.digest()}")
+        print(f"  OK      {entry.ref:28} ships {manifest.precision!s:4} {manifest.digest()}")
     for entry, reason in failed:
         print(f"  FAILED  {entry.ref:28} {reason.splitlines()[0]}")
+
+    demoted = [entry.ref for entry, manifest in mirrored if manifest.precision is Precision.FP32]
+    if demoted:
+        print(
+            f"\n{len(demoted)} artifact(s) ship fp32 because INT8 missed the sanity gate: "
+            f"{', '.join(demoted)}.\nThe INT8 graphs are mirrored alongside and the numbers "
+            "are in each manifest's `sanity` block."
+        )
 
     if mirrored:
         print("\nPin these in gatekeeper/config.py (or as GATEKEEPER_G*_SHA256):")

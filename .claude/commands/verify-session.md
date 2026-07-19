@@ -11,4 +11,4 @@ Run the standard verification pass for lakshmana-core and report a single result
 5. **Contract fixtures**: if `contracts/fixtures/` exists, round-trip serialization test passes byte-identically.
 6. **Conventions spot-check**: no snake_case leaking into stored Firestore field names, no camelCase in Python identifiers (ruff + a grep over serialization modules).
 
-Output: a table of step → status → evidence (one line each). Any failure: fix it and re-run before reporting the pass. Live-GCP checks are NOT part of this command — those are owner-gated.
+Output: a table of step → status → evidence (one line each). Any failure: fix it and re-run before reporting the pass. Live-GCP checks are NOT part of this command — those are owner-gated. **ANY LENGTHY EVALUATION IS NOT PART OF THIS SCOPE**: verification never runs dataset-scale inference — model smoke checks cap at ≤200 pairs / ≤2 minutes CPU (CLAUDE.md rule 0).

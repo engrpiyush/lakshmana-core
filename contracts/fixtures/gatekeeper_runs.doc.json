@@ -30,6 +30,7 @@
       "model": "deberta-mnli-fever-anli@v1",
       "sha256": "",
       "contraMin": 0.85,
+      "neutralConsensus": 0.1,
       "agreementRule": "TWO_FAMILY"
     },
     "g4": {

@@ -26,13 +26,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from gatekeeper.config import Config
+from gatekeeper.config import Config, GateBinding
 from gatekeeper.enums import Gate
 from gatekeeper.errors import ModelFetchError
 from gatekeeper.logging import get_logger
 from gatekeeper.models.manifest import (
     MANIFEST_FILENAME,
     Manifest,
+    Precision,
     sha256_bytes,
     sha256_file,
 )
@@ -44,6 +45,7 @@ __all__ = [
     "GcsBlobStore",
     "LocalBlobStore",
     "ModelLoader",
+    "artifact_for_binding",
     "artifact_for_gate",
     "loader_from_config",
 ]
@@ -71,11 +73,21 @@ class BlobStore(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class Artifact:
-    """A verified artifact on local disk."""
+    """A verified artifact on local disk.
+
+    The cache directory is flat — the shipping precision's files land under their plain
+    names — so nothing downstream of the loader has to know which precision it got. What
+    it *can* know, via :attr:`precision`, is which one produced its numbers.
+    """
 
     ref: ArtifactRef
     directory: Path
     manifest: Manifest
+
+    @property
+    def precision(self) -> Precision:
+        """The precision of the graph on disk, straight off the pinned manifest."""
+        return self.manifest.precision
 
     @property
     def model_path(self) -> Path:
@@ -190,6 +202,7 @@ class ModelLoader:
                 "artifact": parsed.ref,
                 "sourceCheckpoint": manifest.source_checkpoint,
                 "sourceRevision": manifest.source_revision,
+                "precision": str(manifest.precision),
                 "quantization": manifest.quantization,
                 "directory": str(directory),
             },
@@ -236,9 +249,9 @@ class ModelLoader:
         target.parent.mkdir(parents=True, exist_ok=True)
         staging = Path(tempfile.mkdtemp(prefix=f".{ref.name}-{ref.version}-", dir=target.parent))
         try:
-            for filename, expected in manifest.files.items():
+            for filename, expected in manifest.shipping_files.items():
                 destination = staging / filename
-                object_path = f"{ref.prefix}/{filename}"
+                object_path = f"{ref.prefix}/{manifest.object_path(filename)}"
                 try:
                     self._store.download(object_path, destination)
                 except FileNotFoundError as exc:
@@ -275,7 +288,7 @@ class ModelLoader:
         """
         if not directory.is_dir():
             return False
-        for filename, expected in manifest.files.items():
+        for filename, expected in manifest.shipping_files.items():
             candidate = directory / filename
             if not candidate.is_file() or candidate.stat().st_size != expected.bytes_:
                 return False
@@ -285,13 +298,6 @@ class ModelLoader:
 
 
 # --- wiring ----------------------------------------------------------------------------
-
-_GATE_SLOT: dict[Gate, str] = {
-    Gate.G1_NEUTRAL: "g1",
-    Gate.G2_CORROBORATION: "g2",
-    Gate.G3_CONTRADICTION: "g3",
-}
-"""Gate → config slot. G4 is absent by design: it calls Vertex, not an ONNX artifact."""
 
 
 def loader_from_config(config: Config) -> ModelLoader:
@@ -325,17 +331,32 @@ def loader_from_config(config: Config) -> ModelLoader:
     return ModelLoader(GcsBlobStore(bucket), cache_dir=cache_dir)
 
 
+def artifact_for_binding(loader: ModelLoader, binding: GateBinding) -> Artifact:
+    """Load the artifact a run's frozen binding names.
+
+    This is the path the worker uses: the binding comes off the run doc's
+    ``configSnapshot``, so the artifact a gate scores with is the one the run was created
+    with, not whatever config says at the moment the gate happens to execute.
+
+    Raises:
+        ModelFetchError: for every failure :meth:`ModelLoader.load` raises.
+    """
+    return loader.load(binding.model, expected_manifest_sha256=binding.sha256)
+
+
 def artifact_for_gate(loader: ModelLoader, config: Config, gate: Gate) -> Artifact:
-    """Load the artifact a gate's config points at.
+    """Load the artifact a gate's *live* config points at.
+
+    For tools that have no run doc to read a snapshot off — the bake-off harness, the
+    label-order probe. It resolves through :meth:`Config.snapshot` rather than reading the
+    keys directly, so it cannot drift from what a real run would have frozen.
 
     Raises:
         ModelFetchError: for G4, which has no encoder artifact, and for every failure
             :meth:`ModelLoader.load` raises.
     """
-    slot = _GATE_SLOT.get(gate)
-    if slot is None:
-        raise ModelFetchError(f"{gate.value} has no ONNX artifact; it escalates to Vertex")
-    return loader.load(
-        config.get_str(f"gatekeeper.gates.{slot}.model"),
-        expected_manifest_sha256=config.get_str(f"gatekeeper.gates.{slot}.sha256"),
-    )
+    try:
+        binding = GateBinding.from_snapshot(config.snapshot(), gate)
+    except ValueError as exc:
+        raise ModelFetchError(str(exc)) from exc
+    return artifact_for_binding(loader, binding)

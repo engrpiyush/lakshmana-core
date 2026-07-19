@@ -92,6 +92,17 @@ class RosterEntry:
     export: ExportKind = ExportKind.SEQUENCE_CLASSIFICATION
     notes: str = ""
 
+    label_order: tuple[str, ...] = ()
+    """Class name per output column, for checkpoints whose ``config.json`` does not say.
+
+    Empty means "read ``id2label``", which is the normal case and the one to prefer: the
+    artifact then carries its own meaning. Some checkpoints ship the transformers default
+    ``LABEL_0/1/2``, and for those the order has to come from the model card — recorded
+    here, and verified against the sanity fixture by ``scripts/probe_label_order.py``
+    rather than trusted. Column order genuinely differs across the roster (this file's
+    own G1 and G3 rows disagree), so a positional guess is not available.
+    """
+
     @property
     def ref(self) -> str:
         """The ``name@version`` string a config value carries."""
@@ -153,6 +164,11 @@ ALTERNATES: tuple[RosterEntry, ...] = (
         task=ModelTask.NLI_3WAY,
         role="G1/G3 alternate — the LLD's 'EttinX-s' row",
         approx_int8_mb=140,
+        label_order=("contradiction", "entailment", "neutral"),
+        notes="Ships the transformers default `LABEL_0/1/2`, so the column order cannot "
+        "be read off the artifact. Taken from the model card's `label_mapping` and "
+        "confirmed on the sanity fixture by scripts/probe_label_order.py (2026-07-19): "
+        "98% agreement, 62-point margin over the runner-up permutation.",
     ),
     RosterEntry(
         name="vitaminc-mnli",
