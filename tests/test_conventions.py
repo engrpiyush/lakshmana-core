@@ -201,6 +201,91 @@ def test_edge_field_names_are_camel_case() -> None:
     _assert_camel(document)
 
 
+def test_g4_edge_field_names_are_camel_case_in_both_modes() -> None:
+    """The tail's own fields (VA-102): prose, span note, and the SHADOW routing token.
+
+    G4's row is shaped differently from an encoder gate's — no ``stageScores``, two prose
+    fields, and a ``shadow.verdict`` that is not a :class:`Verdict` — so the row above does
+    not cover it. Both judge modes are checked because SHADOW takes an early return and
+    would otherwise be exercised by nothing here.
+    """
+    from gatekeeper.enums import SHADOW_WOULD_ESCALATE_LLM, EscalationReason
+
+    def _assert_camel(node, path=""):
+        if not isinstance(node, dict):
+            return
+        for key, value in node.items():
+            assert CAMEL_CASE.match(key), f"{path}.{key} is not camelCase"
+            _assert_camel(value, f"{path}.{key}")
+
+    decided = EdgeVerdict(
+        claim_a_id="a",
+        claim_b_id="b",
+        subject_id="subject",
+        intake_id="intake",
+        stage3_run_id="run",
+        run_request_id="req",
+        slot="g4",
+        method=Method.GK_G4_LLM,
+        judge_model="gemini-2.5-flash-lite",
+        stage_scores={},
+        verdict=Verdict.CORROBORATES,
+        confidence=0.8,
+        rationale="One short sentence.",
+        temporal_note="Both hold over 2024.",
+    ).to_firestore(JudgeMode.GATEKEEPER)
+
+    _assert_camel(decided)
+    assert decided["rationale"] == "One short sentence."
+    assert decided["temporalNote"] == "Both hold over 2024."
+    # A gate that computed no probabilities writes no slot, rather than an empty one.
+    assert "stageScores" not in decided
+
+    escalated = EdgeVerdict(
+        claim_a_id="a",
+        claim_b_id="b",
+        subject_id="subject",
+        intake_id="intake",
+        stage3_run_id="run",
+        run_request_id="req",
+        slot="g4",
+        method=Method.GK_G4_LLM,
+        judge_model="gemini-2.5-flash-lite",
+        stage_scores={},
+        escalation_reason=EscalationReason.CAP_EXCEEDED,
+    ).to_firestore(JudgeMode.GATEKEEPER)
+
+    _assert_camel(escalated)
+    assert escalated["escalationReason"] == "CAP_EXCEEDED"
+    assert "relation" not in escalated, "a pair nobody judged must claim no relation"
+
+    shadowed = EdgeVerdict(
+        claim_a_id="a",
+        claim_b_id="b",
+        subject_id="subject",
+        intake_id="intake",
+        stage3_run_id="run",
+        run_request_id="req",
+        slot="g4",
+        method=Method.GK_G4_LLM,
+        judge_model="gemini-2.5-flash-lite",
+        stage_scores={},
+        shadow_verdict=SHADOW_WOULD_ESCALATE_LLM,
+    ).to_firestore(JudgeMode.SHADOW)
+
+    _assert_camel(shadowed)
+    assert shadowed["shadow"]["verdict"] == "WOULD_ESCALATE_LLM"
+    assert "relation" not in shadowed, "SHADOW writes shadow.* and nothing else (§9)"
+
+
+def test_g4_gate_counters_are_camel_case() -> None:
+    """The gate-progress panel polls these keys, so they are a UI contract like the rest."""
+    from gatekeeper.gates.g4 import G4_COUNTERS, SPEND_COUNTER
+
+    for counter in (*G4_COUNTERS, SPEND_COUNTER):
+        assert CAMEL_CASE.match(counter), f"{counter} is not camelCase"
+
+
 def test_the_queue_collection_name_is_snake_case() -> None:
     assert QUEUE_COLLECTION == "gatekeeper_pairs"
 

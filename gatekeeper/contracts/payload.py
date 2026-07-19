@@ -190,11 +190,22 @@ class GatekeeperRunRequest:
 
     # -- chaining -------------------------------------------------------------
 
-    def for_gate(self, gate: Gate, *, triggered_by: TriggeredBy | None = None) -> Self:
+    def for_gate(
+        self,
+        gate: Gate,
+        *,
+        mode: RunMode | None = None,
+        triggered_by: TriggeredBy | None = None,
+    ) -> Self:
         """The same run, aimed at another gate — how the worker chains G1 → G2 → …
 
         The ``runRequestId`` is deliberately preserved: the chain is one run, and the
         transactional claim on that id is what keeps redeliveries harmless.
+
+        ``mode`` defaults to this message's own, which is what a chained message wants. An
+        operator's FROM_GATE retrigger changes both the gate and the mode together — the
+        two travel as a pair, since a ``FULL`` message aimed at a failed gate is exactly the
+        redelivery §6 rule 3 forbids from restarting it.
         """
         return type(self)(
             schema_version=self.schema_version,
@@ -202,7 +213,7 @@ class GatekeeperRunRequest:
             intake_id=self.intake_id,
             stage3_run_id=self.stage3_run_id,
             gate=gate,
-            mode=self.mode,
+            mode=mode or self.mode,
             triggered_by=triggered_by or self.triggered_by,
             request_timestamp=self.request_timestamp,
         )

@@ -54,8 +54,29 @@ class GateContext:
     session — the two things a test has no way to afford.
     """
 
+    llm_factory_override: Callable[[Config, str, Any], Any] | None = None
+    """``(config, model, thinkingBudget)`` → G4's Vertex door, replacing the default.
+
+    G4's counterpart to :attr:`scorer_factory`. The default already refuses to call Vertex
+    unless ``gatekeeper.gates.g4.live-calls`` is on, so this seam is not what keeps a test
+    from spending money — it is what lets one *assert* on the calls, and what lets a fault
+    injection make the door fail on demand.
+    """
+
     _reader: Neo4jReader | None = field(default=None, init=False, repr=False)
     _loader: ModelLoader | None = field(default=None, init=False, repr=False)
+
+    def llm_factory(self, config: Config, model: str, thinking_budget: Any) -> Any:
+        """The generative door for G4, honouring an override.
+
+        Imported lazily for the same reason the gate modules are: nothing that merely reads
+        a run doc should drag in ``google.auth`` and a requests session.
+        """
+        if self.llm_factory_override is not None:
+            return self.llm_factory_override(config, model, thinking_budget)
+        from gatekeeper.clients.vertex import client_for
+
+        return client_for(config, model=model, thinking_budget=thinking_budget)
 
     def reader(self) -> Neo4jReader:
         """The read-only graph handle, built once per gate execution."""
@@ -131,6 +152,6 @@ def _load_implementations() -> None:
     """
     if _LOADED:
         return
-    from gatekeeper.gates import g1, g2, g3  # noqa: F401  (imported for their registration)
+    from gatekeeper.gates import g1, g2, g3, g4  # noqa: F401  (imported for registration)
 
     _LOADED.add("gates")

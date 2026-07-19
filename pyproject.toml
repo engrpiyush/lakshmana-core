@@ -21,6 +21,11 @@ dependencies = [
     "google-cloud-pubsub>=2.27.0",
     "google-cloud-run>=0.10.0",
     "google-cloud-monitoring>=2.22.0",
+    # G4 calls Vertex's `generateContent` over REST with ADC, the same door vishwamitra's
+    # `VertexGeminiTransport` uses. It arrives transitively with every google-cloud package
+    # above, but `gatekeeper/clients/vertex.py` imports it directly, so it is declared
+    # directly — a transitive dependency that a sibling drops is an outage, not a warning.
+    "google-auth>=2.35.0",
 ]
 
 [project.optional-dependencies]
@@ -91,6 +96,13 @@ ignore = ["PLR0911", "PLR0912", "PLR0913"]
 "gatekeeper/clients/pubsub.py" = ["PLC0415"]
 "gatekeeper/dispatcher/jobs.py" = ["PLC0415"]
 "gatekeeper/dispatcher/oidc.py" = ["PLC0415"]
+# G4's Vertex door builds ADC credentials and an authorized requests session only when a
+# live call is actually about to happen — the dry-run default must not make `import
+# gatekeeper.gates.g4` reach for application-default credentials.
+"gatekeeper/clients/vertex.py" = ["PLC0415"]
+# FINALIZE is imported at the point of use so the worker's module graph does not gain a
+# cycle: `finalize` needs the run store, which the worker entrypoint already owns.
+"gatekeeper/worker/main.py" = ["PLC0415"]
 # The gate registry imports its implementations lazily so that merely asking "what runs
 # G2?" does not pull in the scorer, and through it ONNX Runtime. The gate modules import
 # the registry to register themselves, so the reverse edge has to be deferred anyway.

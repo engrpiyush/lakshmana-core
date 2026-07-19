@@ -257,6 +257,20 @@ class PairQueue:
     def count_at_gate(self, stage3_run_id: str, gate: Gate) -> int:
         return sum(1 for pair in self.all_pairs(stage3_run_id) if pair.gate is gate)
 
+    def count_decided_by(self, stage3_run_id: str, method: str) -> int:
+        """How many of this run's pairs a given method has already settled.
+
+        G4 uses it to make its spend cap **durable across executions**. A per-execution
+        counter restarts at zero on every sweeper rescue, so a gate that crashed near the
+        cap could resume and spend the whole budget again; the queue rows survive the crash
+        and each ``GK_G4_LLM`` row is exactly one call that was already paid for.
+
+        A pair whose call *failed* is deliberately not counted: it left for a human with
+        ``LLM_ERROR`` and will never be called again, so it cannot re-spend and does not
+        need to hold budget hostage.
+        """
+        return sum(1 for pair in self.all_pairs(stage3_run_id) if pair.decided_by == method)
+
     # -- claiming -------------------------------------------------------------
 
     def claim_batch(

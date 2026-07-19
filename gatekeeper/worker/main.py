@@ -25,6 +25,7 @@ from gatekeeper.logging import configure_logging, get_logger, log_context
 from gatekeeper.runs.model import GatekeeperRun
 from gatekeeper.runs.store import GatekeeperRunStore
 from gatekeeper.worker.gates import GateContext, runner_for
+from gatekeeper.worker.queue import PairQueue
 
 __all__ = ["main", "run_gate"]
 
@@ -96,15 +97,57 @@ def run_gate(
     # result was never recorded (LLD §5).
     following = next_gate(gate)
     if following is None:
-        # After G4 comes FINALIZE, which is internal and publishes nothing (LLD §8).
-        log.info("last gate committed; FINALIZE is pending VA-103")
-    elif publisher is None:
+        # After G4 comes FINALIZE: internal, no message, no lease, publishes nothing
+        # (LLD §8). It runs here rather than as a fifth gate because there is nothing for a
+        # dispatcher to claim — the work is one transaction over a doc this worker just
+        # committed to.
+        return _finalize(store, run_request_id, context)
+    if publisher is None:
         log.warning(
             "no publisher configured; the chain stops here",
             fields={"nextGate": following.value},
         )
     else:
         publisher.publish(run.to_request(following, triggered_by=TriggeredBy.SYSTEM))
+
+    return EXIT_OK
+
+
+def _finalize(store: GatekeeperRunStore, run_request_id: str, context: GateContext) -> int:
+    """Run FINALIZE after G4's commit (LLD §8).
+
+    The run doc is **re-read** rather than reused: ``context.run`` predates G4's own commit,
+    so its gate counters do not carry the tail's spend yet, and ``llmSpendUsd`` has to come
+    from what was durably committed rather than from this process's memory.
+
+    A reconciliation failure fails the *run*, not the gate. The gate genuinely succeeded —
+    it judged what it was given — and what broke is the run-level invariant: some pair is
+    stranded, and marking the run SUCCEEDED over it would tell vishwamitra to consume a
+    verdict set with a hole in it.
+    """
+    from gatekeeper.worker.finalize import ReconciliationError, finalize
+
+    run = store.get(run_request_id)
+    if run is None:
+        log.error("run doc vanished between commit and finalize")
+        return EXIT_BAD_INVOCATION
+
+    queue = PairQueue(
+        context.client,
+        collection=context.config.get_str("gatekeeper.queue.collection"),
+        lease_minutes=context.config.get_int("gatekeeper.queue.lease-minutes"),
+    )
+    spend = float(run.gate(Gate.G4_ESCALATION).counters.get("llmSpendUsd") or 0.0)
+
+    try:
+        finalize(store, run, queue, spend_usd=spend)
+    except ReconciliationError as exc:
+        log.error(
+            "run totals do not reconcile; refusing to mark the run SUCCEEDED",
+            fields={"errorCode": exc.code.value, "detail": exc.detail},
+        )
+        store.fail_run(run_request_id, error_code=exc.code, error_detail=exc.detail)
+        return EXIT_GATE_FAILED
 
     return EXIT_OK
 

@@ -211,6 +211,28 @@ class EdgeVerdict:
     with_context: bool = False
     attempt: int = 1
 
+    rationale: str | None = None
+    """G4's one-or-two sentence prose. §8: "prose lands exactly where humans will look."
+
+    Only the LLM tail ever sets it — an encoder has no prose to offer, and a rationale
+    invented for one would be the row asserting a reason no model gave.
+    """
+
+    temporal_note: str | None = None
+    """G4's span reasoning, when the relation hinged on *when* the claims hold.
+
+    Mirrors the ensemble row's own field so a human reviewing a contradiction sees the same
+    shape whichever judge produced it.
+    """
+
+    shadow_verdict: str | None = None
+    """Overrides the ``shadow.verdict`` token when the outcome is not a relation.
+
+    Exists for exactly one case: :data:`~gatekeeper.enums.SHADOW_WOULD_ESCALATE_LLM`, the
+    routing statement G4 records in SHADOW mode. Everything else derives the token from
+    ``verdict``, so this stays ``None`` on every other write.
+    """
+
     @property
     def key(self) -> str:
         return edge_key(self.claim_a_id, self.claim_b_id, with_context=self.with_context)
@@ -242,21 +264,30 @@ class EdgeVerdict:
             "gkRunRequestId": self.run_request_id,
             "method": self.method.value,
             "attempt": self.attempt,
-            "stageScores": {self.slot: self.stage_scores},
             "updatedAt": firestore.SERVER_TIMESTAMP,
             "createdAt": firestore.SERVER_TIMESTAMP,
         }
 
+        # An empty map writes no slot at all. G4 is the gate that has none — an LLM's
+        # self-reported confidence is not a probability §7.2's calibration corpus can use —
+        # and `stageScores.g4: {}` would put an empty promise in a map whose whole contract
+        # is "these are the numbers a decision consulted". Same reasoning as G2 declining to
+        # write a support score for a pair it never judged.
+        if self.stage_scores:
+            document["stageScores"] = {self.slot: self.stage_scores}
+
         if judge_mode is JudgeMode.SHADOW:
-            document["shadow"] = {
-                "verdict": self.verdict.value if self.verdict else None,
+            shadow: dict[str, Any] = {
+                "verdict": self.shadow_verdict or (self.verdict.value if self.verdict else None),
                 "method": self.method.value,
-                "stageScores": {self.slot: self.stage_scores},
                 "gkRunRequestId": self.run_request_id,
                 "escalationReason": (
                     self.escalation_reason.value if self.escalation_reason else None
                 ),
             }
+            if self.stage_scores:
+                shadow["stageScores"] = {self.slot: self.stage_scores}
+            document["shadow"] = shadow
             return document
 
         document["judgeModel"] = self.judge_model
@@ -267,6 +298,10 @@ class EdgeVerdict:
             document["confidence"] = self.confidence
         if self.escalation_reason is not None:
             document["escalationReason"] = self.escalation_reason.value
+        if self.rationale is not None:
+            document["rationale"] = self.rationale
+        if self.temporal_note is not None:
+            document["temporalNote"] = self.temporal_note
         return document
 
 

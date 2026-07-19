@@ -525,6 +525,49 @@ class GatekeeperRunStore:
 
     # -- finalize -------------------------------------------------------------
 
+    def fail_run(self, run_request_id: str, *, error_code: ErrorCode, error_detail: str) -> bool:
+        """Fail a run without touching any gate — FINALIZE's failure path (LLD §8).
+
+        Every other failure in the system is a *gate* failure, and :meth:`fail_gate` is how
+        it is recorded. FINALIZE has no gate: it runs after G4 has legitimately committed,
+        so there is nothing to mark FAILED and pushing G4 back to FAILED would be a lie
+        about which step broke — and would make a FROM_GATE retrigger re-run the whole
+        expensive tail to fix a bookkeeping problem.
+
+        The code and detail land on the run doc's own ``errorCode``/``errorDetail``, which is
+        where the runbook's "which gate, what code" lookup falls back to when no gate entry
+        carries one.
+
+        Returns:
+            True if the run moved to FAILED; False if it was already terminal.
+        """
+        doc_ref = self._collection.document(run_request_id)
+        now = self._clock()
+
+        @firestore.transactional
+        def _fail(transaction: firestore.Transaction) -> bool:
+            snapshot = doc_ref.get(transaction=transaction)
+            if not snapshot.exists:
+                return False
+
+            run = GatekeeperRun.from_firestore(snapshot.to_dict())
+            if run.state is not RunState.RUNNING:
+                return False
+
+            transaction.update(
+                doc_ref,
+                {
+                    "state": RunState.FAILED.value,
+                    "errorCode": error_code.value,
+                    "errorDetail": error_detail,
+                    "endedAt": now,
+                    "updatedAt": firestore.SERVER_TIMESTAMP,
+                },
+            )
+            return True
+
+        return self._commit(_fail)
+
     def finalize_run(self, run_request_id: str, totals: RunTotals) -> bool:
         """FINALIZE: write ``totals`` and set the run SUCCEEDED (LLD §8).
 

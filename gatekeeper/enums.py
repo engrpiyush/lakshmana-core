@@ -126,6 +126,16 @@ class Verdict(StrEnum):
     CONTRADICTS = "CONTRADICTS"
 
 
+SHADOW_WOULD_ESCALATE_LLM = "WOULD_ESCALATE_LLM"
+"""What ``shadow.verdict`` records for a pair G4 would have sent to the LLM (LLD §8).
+
+Not a :class:`Verdict` member, and deliberately so: it is not a relation between two
+claims, it is a statement about *routing*. In SHADOW mode G4 makes no calls at all —
+comparing an LLM to an LLM would spend money to learn nothing — so this token is the only
+honest thing the row can say about a pair that reached the tail.
+"""
+
+
 class Method(StrEnum):
     """``stage3_edges.method`` — who produced a verdict (LLD §7.2).
 

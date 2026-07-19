@@ -145,10 +145,16 @@ SETTINGS: tuple[Setting, ...] = (
         ("g3", "agreementRule"),
     ),
     # --- G4_ESCALATION -----------------------------------------------------------
+    # The flash-lite row §8 names. It was `pending-lite-pin` until VA-102 needed something
+    # a live call could actually resolve; the LLD had already chosen flash-lite, so this
+    # only makes that choice concrete. Vishwamitra pins its own judge model in the
+    # admin-managed `providers/stage3-judge` row, which is deliberately *not* read here —
+    # the two judges are meant to be independently pinnable, and a SHADOW comparison where
+    # one side silently follows the other's pin would measure nothing.
     Setting(
         "gatekeeper.gates.g4.llm-model",
         "GATEKEEPER_G4_LLM_MODEL",
-        "pending-lite-pin",
+        "gemini-2.5-flash-lite",
         str,
         ("g4", "llmModel"),
     ),
@@ -165,6 +171,24 @@ SETTINGS: tuple[Setting, ...] = (
         512,
         int,
         ("g4", "thinkingBudget"),
+    ),
+    # --- G4 runtime (not frozen: where and whether, not what) --------------------
+    # Live calls are off by default so no process reaches Vertex without being told to
+    # (CLAUDE.md hard rule 4). Off means the dry-run double, which exercises every G4 path
+    # except the network one.
+    Setting("gatekeeper.gates.g4.live-calls", "GATEKEEPER_G4_LIVE_CALLS", False, _to_bool),
+    Setting("gatekeeper.gates.g4.region", "GATEKEEPER_G4_REGION", "asia-southeast1", str),
+    Setting("gatekeeper.gates.g4.max-output-tokens", "GATEKEEPER_G4_MAX_OUTPUT_TOKENS", 512, int),
+    # Published flash-lite rates, per million tokens. Config rather than constants because
+    # prices move and a number baked into source is a number nobody updates; the run doc's
+    # `llmSpendUsd` is only as honest as these two.
+    Setting("gatekeeper.gates.g4.usd-per-million-input", "GATEKEEPER_G4_USD_IN", 0.10, float),
+    Setting("gatekeeper.gates.g4.usd-per-million-output", "GATEKEEPER_G4_USD_OUT", 0.40, float),
+    Setting(
+        "gatekeeper.integration.prompts-collection",
+        "GATEKEEPER_PROMPTS_COLLECTION",
+        "extraction_prompts",
+        str,
     ),
     # --- runtime (not frozen into the snapshot) ----------------------------------
     Setting("gatekeeper.lease.gate-minutes", "GATEKEEPER_LEASE_GATE_MINUTES", 90, int),

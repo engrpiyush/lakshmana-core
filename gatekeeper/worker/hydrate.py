@@ -24,9 +24,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from gatekeeper.clients.neo4j import Neo4jReader
+from gatekeeper.gates.prompts import ClaimCard
 from gatekeeper.logging import get_logger
 
-__all__ = ["GraphPair", "claim_texts", "explanation_texts", "queued_pairs"]
+__all__ = ["GraphPair", "claim_cards", "claim_texts", "explanation_texts", "queued_pairs"]
 
 log = get_logger(__name__)
 
@@ -56,6 +57,22 @@ UNWIND $claimIds AS claimId
 MATCH (c:Claim {claimId: claimId})
 RETURN c.claimId AS claimId,
        [ (x:Explanation)-[:EXPLAINS]->(c) | x.text ][0] AS text
+"""
+
+_CARD_CYPHER = """
+UNWIND $claimIds AS claimId
+MATCH (c:Claim {claimId: claimId})
+RETURN c.claimId AS claimId, c.text AS text, c.type AS type,
+       c.sourceClass AS sourceClass, c.claimedDate AS claimedDate,
+       c.relationship AS relationship, c.speakerRole AS speakerRole,
+       [ (x:Explanation)-[:EXPLAINS]->(c) | x.text ][0] AS explanationText
+"""
+"""Every field the G4 prompt's claim card renders (LLD §8 G4, O-3).
+
+One query rather than two because G4 needs the sidecar and the card together, and unlike
+the encoder gates it is called on a handful of pairs — the round trip is not the cost that
+matters here. Each property is one vishwamitra's evidence projection writes onto
+``:Claim``; a null simply drops its line from the card.
 """
 
 
@@ -99,6 +116,43 @@ def claim_texts(reader: Neo4jReader, claim_ids: list[str]) -> dict[str, str]:
 def explanation_texts(reader: Neo4jReader, claim_ids: list[str]) -> dict[str, str]:
     """``{claimId: explanationText}`` — the §11.9 sidecar, for `withContext` pairs only."""
     return _texts(reader, _EXPLANATION_CYPHER, claim_ids)
+
+
+def claim_cards(reader: Neo4jReader, claim_ids: list[str]) -> dict[str, ClaimCard]:
+    """``{claimId: ClaimCard}`` — the full card G4's prompt renders, sidecar included.
+
+    Claims with no ``text`` are skipped: a card with an empty Text line asks the model to
+    judge nothing, and the caller treats a missing card as a hydrate failure.
+    """
+    unique = sorted({claim_id for claim_id in claim_ids if claim_id})
+    if not unique:
+        return {}
+
+    rows: list[dict[str, Any]] = reader.run(_CARD_CYPHER, claimIds=unique)
+    cards: dict[str, ClaimCard] = {}
+    for row in rows:
+        claim_id, text = row.get("claimId"), row.get("text")
+        if not claim_id or not text:
+            continue
+        cards[str(claim_id)] = ClaimCard(
+            claim_id=str(claim_id),
+            text=str(text),
+            type=_optional(row.get("type")),
+            source_class=_optional(row.get("sourceClass")),
+            claimed_date=_optional(row.get("claimedDate")),
+            relationship=_optional(row.get("relationship")),
+            speaker_role=_optional(row.get("speakerRole")),
+            explanation_text=_optional(row.get("explanationText")),
+        )
+    return cards
+
+
+def _optional(value: Any) -> str | None:
+    """A graph property as a card line, or None when it has nothing to say."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _texts(reader: Neo4jReader, cypher: str, claim_ids: list[str]) -> dict[str, str]:

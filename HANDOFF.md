@@ -1,103 +1,153 @@
-# HANDOFF — after session05 (VA-100 G2_CORROBORATION · VA-101 G3_CONTRADICTION)
+# HANDOFF — after session06 (VA-102 G4_ESCALATION + FINALIZE · VA-103 purge & retrigger)
 
-> Date: 2026-07-19 · Repo: lakshmana-core · LLD: page 255688733 **v1.6** (mirror synced, page version 7)
-> Session file: `execution-plan/session05.md` — **deleted**, the session is complete.
-> VA-100 and VA-101 → **In Review**.
-> Mode: **FINISH-ALL-CODE**. Nothing is parked. Three new DEFERRED-LIVE items (25–27).
-> Tests: **375 passed, 1 skipped** — and the skip is now *fixable locally*, see item 27.
+> Date: 2026-07-19 · Repo: lakshmana-core · LLD: mirror at **v1.7**, Confluence page 255688733 still at **v1.6**
+> Session file: `execution-plan/session06.md` — **deleted**, the session is complete.
+> VA-102 and VA-103 → **NOT transitioned** (see "Two things the owner has to do" below).
+> Mode: **FINISH-ALL-CODE**. Nothing is parked. Five new DEFERRED-LIVE items (28–32), one correction (27).
+> Tests: **437 passed, 1 skipped** (was 375 · +62).
 
 ## The short version
 
-Three gates of the cascade now run end to end. One Pub/Sub push drives G1 → G2 → G3, each
-gate claiming its own lease, judging its own slice, committing, and publishing the next —
-`tests/test_e2e_cascade.py::test_the_chain_drives_itself_from_g1_through_g2_to_g3` feeds each
-published message back through the real dispatcher rather than calling the next gate directly,
-so the claim transaction is exercised three times over.
+**The cascade is complete.** One Pub/Sub push now drives G1 → G2 → G3 → G4 → FINALIZE, and the
+run doc ends `SUCCEEDED` with totals that reconcile. `test_the_full_chain_reaches_finalize_and_the_totals_reconcile`
+feeds every published message back through the real dispatcher, so four claim transactions are
+exercised, and the walk terminates on its own because G4 publishes nothing — that termination is
+part of what the test asserts.
 
-**G2** scores support in both claim-vs-claim directions and, where the paired claim has a
-source excerpt, additionally scores claim-vs-evidence — MiniCheck's native `(document, claim)`
-shape, and the one thing this cascade can do that the LLM judge could not. **G3** cross-checks
-contradiction across two model families, reading family A's logits back off the edge row rather
-than re-inferring them, and routes agreed candidates to the human queue without ever finalizing
-a CONTRADICTS verdict.
+**G4** is the only thing in this system that spends money, and nearly every design choice in it
+follows from that. It runs one call per pair against a pinned flash-lite row, reusing
+vishwamitra's judge prompt with the rubric resolved live from the shared `extraction_prompts`
+registry. Its cap is durable across executions; a Vertex error costs its pair and never the gate;
+an answer nobody can parse is an error and never a verdict; and **the live door is off by
+default**, so the whole cascade runs locally, cap and error paths included, without spending
+anything.
+
+**FINALIZE** recomputes `totals` from the queue rather than summing gate counters, and refuses to
+mark a run `SUCCEEDED` if any pair is stranded at a committed gate — the one failure mode that
+would otherwise tell vishwamitra to consume a verdict set with a hole in it, silently.
+
+**VA-103** proves the operator stories end to end: double FROM_START, FROM_GATE refused on a
+healthy gate in each of its three shapes, redelivered retrigger, and D‑5 — which turned out to be
+stronger than the LLD claimed.
+
+## Two things the owner has to do
+
+1. **Push the LLD.** The mirror is at v1.7; page 255688733 is still at v1.6. This session ran
+   headless with the Atlassian MCP unauthorized, so the whole-body push could not be made.
+   CLAUDE.md says the page and the mirror move together — they are apart *now*, and the mirror is
+   ahead. A banner at the top of `lakshmana-gatekeeper-lld-wiki.md` says so; delete it after the
+   push. **Until then, read the file, not the page.**
+2. **Transition VA-102 and VA-103 to In Review.** Same reason. Both are code-complete and green.
+
+Authorize the connector (claude.ai connector settings, or `/mcp` in an interactive session) and a
+short rerun clears both.
 
 ## What was built
 
-- `gatekeeper/gates/g2.py` — claim batch → hydrate → score (both directions + grounding) →
-  `decide_g2` → edge write → route. Counters `seen, corroborates, forwarded, grounded,
-  flaggedPassThrough, truncated`.
-- `gatekeeper/gates/g3.py` — claim batch → read family A off `stageScores.g1` → score family B →
-  `decide_g3` → edge write → route. Counters `seen, neutral, humanRouted, escalated, truncated`.
-- `gatekeeper/integration.py::source_excerpts` — the `claims.sourceExcerpt` read G2's grounding
-  mode needs, chunked through `getAll`.
-- `gatekeeper/worker/edges.py` — `g2_stage_scores`, `g3_stage_scores`,
-  `g1_scores_from_stage_scores`, and `EdgeWriter.read_stage_scores` (direct gets by
-  deterministic key; no index).
-- `decisions.py` — `decide_g3` now sets `confidence` on its ROUTE_HUMAN decision. Added to the
-  *shared* function rather than the gate so replay parity holds by construction.
-- Config: `gatekeeper.integration.claims-collection` (env `GATEKEEPER_CLAIMS_COLLECTION`).
-- Tests: `test_g2_gate.py` (10), `test_g3_gate.py` (9), the three-gate chain, and a registry
-  regression test. LLD v1.6 on both the mirror and Confluence.
+### VA-102 — G4_ESCALATION + FINALIZE
 
-## Three decisions worth knowing about
+| File | What it is |
+| --- | --- |
+| `gatekeeper/gates/prompts.py` | The G4 prompt (**closes O‑3**), rubric resolution, hostile parser |
+| `gatekeeper/clients/vertex.py` | ADC + regional `generateContent`, bounded backoff, spend, dry-run double |
+| `gatekeeper/gates/g4.py` | The gate: cap, per-pair error policy, SHADOW suppression, counters |
+| `gatekeeper/worker/finalize.py` | The tally, the reconciliation invariant, `totals` |
 
-**1. The source excerpt is in Firestore, not the graph.** The LLD said "the paired claim's
-source snippet" without saying where it lives. It is not in Neo4j at all —
-`Stage3GraphRepository.mergeEvidence` writes `text`/`basis`/`sourceClass` onto `:Claim` but
-never `sourceExcerpt`, and `:Source` carries no text. A graph read would have returned nothing
-for every pair and failed *silently*. It is read from vishwamitra's `claims` collection instead,
-read-only. New open item **O‑9** on the LLD, and DEFERRED-LIVE 26 asks for a coverage count on
-real data — if few claims carry an excerpt, grounding mode is decoration.
+**O‑3, resolved.** The prompt is a *trim* of `Judging.kt`'s `judgePrompt`, not a rewrite. Kept
+verbatim: the task line, the §14 data-hardening clause, the card shape and field order, the
+strict-JSON contract keyed by 1-based index, the relation vocabulary, `temporalNote`, and the
+`explanationRelevant` question. The **rubric is resolved live** from `extraction_prompts/STAGE3_JUDGE`
+(read-only) with a vendored fallback — mirroring `ExtractionPromptService.resolveKey`, because in
+SHADOW mode the two judges must be answering the same question and a rubric living only in
+lakshmana's source would drift the instant an admin edited the shared one.
 
-**2. G3's edge row does carry `relation = CONTRADICTS`, and this is not a violation of "the
-cascade never finalizes CONTRADICTS".** They are different layers, and getting this wrong in
-either direction is expensive. On the **queue** row the pair leaves with `tier = HUMAN` and no
-`decidedBy` — that field is what asserts the cascade settled a pair, and G3 never sets it. On
-the **edge** row `relation` is a pair-level *candidate*: vishwamitra's `FactAssembler` lifts
-CORROBORATES/CONTRADICTS pair rows into Fact edges and stamps every contradiction
-`reviewStatus = PROPOSED`, which is exactly what the §11.10 human queue reads. Writing nothing
-would have made confirmed contradictions **invisible** to the queue built to review them. That
-is the DoD's "visible to the existing contradiction-queue reader", and it is tested against the
-fields the assembler actually consumes.
+Three trims, each with a reason:
 
-**3. The candidate's confidence is `min(famA, famB)`, the weaker family.** §8 gives ROUTE_HUMAN
-no confidence, but the §11.10 queue orders and floors on one. A two-family agreement is only as
-strong as the family least convinced by it; `max` would let one confident model push a pair the
-other barely flagged to the top of a human's worklist — the self-consistency failure this
-cross-check exists to replace.
+- **batching** → one pair, since §8 pins one call per pair;
+- **`flipPresentation`** → dropped. It is the ensemble's position-bias control *across k samples*,
+  and k=1 has nothing to alternate over — flipping would relabel the bias, not cancel it. Worth
+  saying plainly: **this is a real accuracy difference between G4 and today's ensemble**, accepted
+  because G4 sees ~5% of pairs and the alternative is paying k=3 for the whole tail;
+- **`sharedEntities`** → dropped, because lakshmana's queue read does not carry it. A hint, not
+  evidence; omitting costs a shortcut, faking would be a lie. Restoring it is a hydrate change.
 
-## Two bugs found and fixed on the way
+**The cap is durable.** `maxLlmPairs` is checked against how many pairs the *run* has already
+settled with `GK_G4_LLM`, counted off `gatekeeper_pairs` — not a counter that restarts at zero on
+every sweeper rescue. A gate that crashed at 2,999 calls and resumed on a fresh counter would
+spend the budget twice, and the run doc would only reveal it to someone adding two attempts up by
+hand. `test_the_cap_is_durable_across_a_resumed_gate` is the regression.
 
-**The gate registry silently disabled G2 and G3.** `_load_implementations` guarded on
-`if _RUNNERS:` — but each gate module registers itself on import, so anything importing
-`gatekeeper.gates.g1` directly (the replay harness, half the test suite) left the registry
-non-empty and the guard concluded "already loaded". Every other gate then resolved to
-`no_op_gate`, **which commits successfully**: a full cascade would have run G1 for real, committed
-zeroes for G2 and G3, and reported SUCCEEDED having skipped two thirds of the judging. Now a
-dedicated `_LOADED` flag, with a regression test that reproduces the trigger.
+**FINALIZE recomputes from the queue.** Counters are per-execution; a rescued gate writes a fresh
+set, so summing them across a swept run double-counts exactly the pairs the sweep touched. The
+queue has one row per pair by construction, which is what makes
+`decidedByGates + escalatedLlm + escalatedHuman == pairsSeen` a real check rather than a circular
+one. Classification is **tier first, method second** — a G3 candidate and a G4 failure both leave
+`decidedBy` unset, and reading it first would put them in no bucket at all.
 
-**The real-Neo4j test could never run.** `test_the_hydration_cypher_runs_against_a_real_neo4j`
-called `load_config({})` — an empty env map — so `GATEKEEPER_NEO4J_PASSWORD` could never arrive
-and it skipped unconditionally, including in session04's "0 skipped" claim. Now `load_config()`.
-Verified passing against the running container. It still skips in this repo because the password
-is not in the settings env — see DEFERRED-LIVE 27, a one-line owner fix.
+A reconciliation failure fails the **run**, not the gate: the gate genuinely succeeded, and what
+broke is a run-level invariant. That needed a new `store.fail_run` and two new run-doc fields
+(`errorCode`/`errorDetail`) — pushing G4 back to FAILED would misreport which step broke *and*
+make a FROM_GATE retrigger re-run the whole expensive tail to fix a bookkeeping problem.
+
+### VA-103 — purge & retrigger
+
+`tests/test_retrigger.py` (14 tests). Double FROM_START with the purge in between; purge and queue
+reset each idempotent on their own; FROM_GATE refused on a `PENDING` gate, on a live-leased
+`RUNNING` gate, and (earliest of all) on a gate whose predecessor never succeeded; FROM_GATE
+*admitted* on a lease-expired gate; redelivered retrigger losing to its own first copy; superseded
+run refusing every mode.
+
+**D‑5 is stronger than the LLD claimed.** The purge's `stage3RunId` filter and its `method`
+re-check were documented as belt and braces. Reading vishwamitra's `Stage3EdgeVerdict` shows the
+first is absolute: an ensemble row carries **neither `stage3RunId` nor `method`**, so the purge
+query cannot return one *even in principle* — the field it filters on does not exist on those
+documents. Both guards are now tested, the second against a row built to sit inside the query's
+reach. LLD §10 updated to say so.
+
+## Decisions worth knowing
+
+- **`llmModel` default is now `gemini-2.5-flash-lite`**, replacing `pending-lite-pin`, which no
+  live call could resolve. Not a new product decision — §8 had already chosen flash-lite; this
+  makes the row concrete. Vishwamitra's `providers/stage3-judge` pin is deliberately **not** read:
+  the judges are meant to be independently pinnable, and a SHADOW comparison where one silently
+  follows the other's pin measures nothing. Owner confirms both in DEFERRED 29.
+- **`shadowDisagreed` ships as 0 and VA-105 owns the real number** (DEFERRED 32). In GATEKEEPER
+  that is correct — the cascade's verdict *is* the verdict. In SHADOW the honest number cannot be
+  computed at finalize time: the ensemble runs concurrently and may not have judged a pair yet, so
+  any count taken then races it with a systematic bias toward zero. Do not read the zero as
+  evidence of agreement.
+- **No `stageScores.g4`, and no empty slot either.** §7.2's map is the encoders' calibration
+  corpus; an LLM's self-reported confidence is not a comparable number. The tail contributes prose
+  (`rationale`, `temporalNote`). `EdgeVerdict` now omits the slot entirely when a gate computed
+  nothing — same reasoning as G2 declining to write a support score for a pair it never judged.
+- **`GATEKEEPER_G4_LIVE_CALLS` defaults false.** Hard rule 4 in code: `client_for` returns the
+  dry-run double unless told otherwise, so no deployment reaches Vertex by accident and the full
+  cascade is exercisable on a laptop.
+- **`thinkingBudget` vs `thinkingLevel`** — Gemini 3.x swapped the knob and *silently ignores the
+  wrong one*, so a pin bump to a 3.x row would quietly restore full thinking and multiply the
+  bill. `thinking_config()` ports `GeminiThinking.config`. Unit-covered, never seen a real 3.x
+  response (DEFERRED 30).
 
 ## State
 
-- **375 passed, 1 skipped.** The skip is the `neo4j` cypher smoke; set
-  `GATEKEEPER_NEO4J_PASSWORD=vishwamitra-dev` and it passes (0 skipped, verified).
-- Both Docker images build. Ruff clean and formatted.
-- Nothing parked. No live GCP touched, no infra mutated, no commits made.
+- **Tests: 437 passed, 1 skipped.** The skip is the real-Neo4j cypher test (DEFERRED 27).
+- **Lint/format clean**; both images build; contract fixtures byte-identical.
+- Local-stack smoke: the real `worker.main()` drove **G4 + FINALIZE** against the emulator →
+  `exit=0`, run `SUCCEEDED`. G1–G3 were settled through the store for that smoke on purpose —
+  each of them ends by publishing to *real* Pub/Sub, and a live publish is owner-gated.
+- `gatekeeper.gates.g4.live-calls` has never been on. **Vertex has never been called.**
 
-## What's next — session06 (VA-102 G4_ESCALATION · VA-103 FINALIZE)
+**DEFERRED-LIVE 27 corrected.** It told the owner to put the Neo4j password in
+`.claude/settings.local.json` "(gitignored)". That file is **tracked** — the fix as written would
+commit a container credential. Gitignore it first, or export the variable from the shell. I
+declined to write it and verified the path another way: a scratch smoke drove `worker.main()`
+against the live container read-only with the variable set, and G1's hydrate cypher ran clean.
 
-`execution-plan/session06.md` is the next file. G4 is the first gate that spends money: pinned
-flash-lite, k=1, `maxLlmPairs` cap, `WOULD_ESCALATE_LLM` in SHADOW, and a dry-run double locally
-per the FINISH-ALL-CODE rule (the live spot-check is DEFERRED-LIVE 5). It plugs into exactly the
-same seams G2 and G3 used — `gates/g4.py` + `register()`, `GateContext.scorer_factory` swapped
-for a Vertex client — and `runner_for(G4_ESCALATION)` still resolves to `no_op_gate`, which is
-the signal that it is genuinely not built yet. FINALIZE computes `totals` and sets the run
-SUCCEEDED; it publishes nothing.
+## What is next
 
-Watch for: G4's counters are the last input to `totals`, and `run_gate` currently logs
-"last gate committed; FINALIZE is pending VA-103" instead of finalizing.
+`execution-plan/session07.md` (**REPO: vishwamitra-core** — VA-106 integration, executed over
+there) and `execution-plan/session08.md` (VA-104 alerts/runbook, VA-105 SHADOW + cutover). The
+`/next-session` guard says session08 must not start while session07 exists.
+
+All lakshmana *code* for the cascade is now written. What remains here is session08's operational
+work; everything else is the single DEFERRED-LIVE round.

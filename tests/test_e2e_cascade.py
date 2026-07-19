@@ -43,13 +43,14 @@ class InlineWorkerLauncher:
     exactly the seam ``JobLauncher`` exists to make substitutable.
     """
 
-    def __init__(self, store, client, config, publisher, graph, scorer):
+    def __init__(self, store, client, config, publisher, graph, scorer, llm=None):
         self.store = store
         self.client = client
         self.config = config
         self.publisher = publisher
         self.graph = graph
         self.scorer = scorer
+        self.llm = llm
         self.exit_codes: list[int] = []
 
     def execute(self, request: GatekeeperRunRequest, *, lease_owner: str) -> str:
@@ -66,6 +67,11 @@ class InlineWorkerLauncher:
                 lease_owner=lease_owner,
                 reader_factory=lambda: self.graph,
                 scorer_factory=lambda binding: self.scorer,
+                # None leaves G4 on its shipped default, which is the dry-run double —
+                # so a test that forgets to pass one still cannot reach Vertex.
+                llm_factory_override=(
+                    None if self.llm is None else (lambda config, model, budget: self.llm)
+                ),
             ),
             publisher=self.publisher,
         )
@@ -355,6 +361,198 @@ def test_the_chain_drives_itself_from_g1_through_g2_to_g3(
 
     # And family A on that row is exactly what G1 wrote — G3 read it, never re-derived it.
     assert forwarded["stageScores"]["g1"]["conFwd"] == pytest.approx(UNDECIDED.contradiction)
+
+
+# --- the whole cascade, G1 to FINALIZE ------------------------------------------------------
+
+
+def _drive(client, publisher, first_message):
+    """Follow every message the gates publish until the chain runs dry.
+
+    Unlike the three-gate walk above, nothing is filtered out: G4 publishes nothing (§8) and
+    FINALIZE is internal, so the chain terminates on its own. That termination is itself part
+    of what this asserts — a cascade that kept publishing would loop here forever.
+    """
+    pending, driven = [first_message], []
+    while pending:
+        message = pending.pop(0)
+        before = len(publisher.published)
+        assert client.post("/pubsub/push", json=_envelope(message)).status_code == 204
+        driven.append(message.gate)
+        pending.extend(publisher.published[before:])
+    return driven
+
+
+def _cascade_dispatcher(store, config, launcher, publisher):
+    return Dispatcher(
+        store=store,
+        config=config,
+        launcher=launcher,
+        judge_mode_resolver=lambda _: JudgeMode.GATEKEEPER,
+        lease_owner_factory=lambda: OWNER,
+        verifier=OidcVerifier(required=False),
+        publisher=publisher,
+    )
+
+
+def test_the_full_chain_reaches_finalize_and_the_totals_reconcile(
+    store, emulator_client, runs_collection
+) -> None:
+    """Session06's integration proof: one push, four gates, FINALIZE, run SUCCEEDED.
+
+    The DoD's "G1 → FINALIZE green" with a dry-run LLM double. What makes this more than a
+    longer version of the three-gate walk is the *reconciliation*: every one of the six pairs
+    has to land in exactly one of `totals`' three buckets, so a routing bug anywhere in the
+    cascade shows up here as a failed run rather than as a plausible-looking number.
+    """
+    from fastapi.testclient import TestClient
+
+    from gatekeeper.enums import GateState, RunState
+    from tests.test_g4_gate import ScriptedLlm, _verdict_json
+
+    suffix = uuid.uuid4().hex[:12]
+    collections, config = _cascade_config(suffix)
+
+    stage3_run_id = f"stage3run-{suffix}"
+    emulator_client.collection(collections["runs"]).document(stage3_run_id).set(
+        {"subjectId": f"subject-{suffix}", "paramsSnapshot": '{"judgeMode": "GATEKEEPER"}'}
+    )
+
+    pairs, texts, scorer = _cascade_fixture()
+    llm = ScriptedLlm([_verdict_json("NEUTRAL", 0.61)])
+    publisher = RecordingPublisher()
+    launcher = InlineWorkerLauncher(
+        store, emulator_client, config, publisher, FakeGraph(pairs, texts), scorer, llm
+    )
+
+    request = GatekeeperRunRequest(
+        schema_version=SCHEMA_VERSION,
+        run_request_id=str(uuid.uuid4()),
+        intake_id=f"intake-{suffix}",
+        stage3_run_id=stage3_run_id,
+        gate=Gate.G1_NEUTRAL,
+        mode=RunMode.FULL,
+        triggered_by=TriggeredBy.OPERATOR,
+        request_timestamp="2026-07-19T04:15:00.000Z",
+    )
+
+    with TestClient(
+        create_app(_cascade_dispatcher(store, config, launcher, publisher)),
+        raise_server_exceptions=False,
+    ) as client:
+        driven = _drive(client, publisher, request)
+
+    assert driven == [
+        Gate.G1_NEUTRAL,
+        Gate.G2_CORROBORATION,
+        Gate.G3_CONTRADICTION,
+        Gate.G4_ESCALATION,
+    ]
+    assert launcher.exit_codes == [EXIT_OK] * 4
+
+    run = store.get(request.run_request_id)
+    assert run.state is RunState.SUCCEEDED
+    assert all(run.gate(gate).state is GateState.SUCCEEDED for gate in Gate)
+
+    # Two pairs G1 settled, two the tail settled, two G3 sent to a human — and nothing else,
+    # which is the invariant `finalize` refuses to write totals without.
+    totals = run.totals
+    assert totals.pairs_seen == 6
+    assert totals.decided_by_gates == 2
+    assert totals.escalated_llm == 2
+    assert totals.escalated_human == 2
+    assert (
+        totals.decided_by_gates + totals.escalated_llm + totals.escalated_human == totals.pairs_seen
+    )
+
+    # The tail was called once per escalated pair, and its spend reached the run doc.
+    assert len(llm.prompts) == 2
+    assert run.gate(Gate.G4_ESCALATION).counters["llmCalls"] == 2
+    assert totals.llm_spend_usd > 0
+
+    # §8: FINALIZE publishes nothing, so the last message on the wire named G4.
+    assert publisher.published[-1].gate is Gate.G4_ESCALATION
+
+
+def test_three_consecutive_reruns_leave_the_history_intact(
+    store, emulator_client, runs_collection
+) -> None:
+    """The DoD's "three consecutive re-runs leave history intact" (§7.1, §10, D-5).
+
+    Each FROM_START mints a new ``runRequestId`` and purges its predecessor's verdicts, while
+    every run doc survives with its own totals — "which run produced this verdict" has to
+    stay answerable forever.
+
+    Note what does **not** happen: none of these runs is SUPERSEDED. Each one finishes before
+    the next begins, and `_non_terminal_predecessors` only supersedes REQUESTED and RUNNING
+    predecessors — a completed run keeps its state, which is the whole point of an immutable
+    history. Supersede is what happens to a run a re-run *interrupts*, and that story is
+    `test_retrigger.py::test_a_second_from_start_supersedes_the_first_and_purges_its_output`.
+    """
+    from fastapi.testclient import TestClient
+
+    from gatekeeper.enums import RunState
+    from tests.test_g4_gate import ScriptedLlm, _verdict_json
+
+    suffix = uuid.uuid4().hex[:12]
+    collections, config = _cascade_config(suffix)
+
+    stage3_run_id = f"stage3run-{suffix}"
+    emulator_client.collection(collections["runs"]).document(stage3_run_id).set(
+        {"subjectId": f"subject-{suffix}", "paramsSnapshot": '{"judgeMode": "GATEKEEPER"}'}
+    )
+    pairs, texts, scorer = _cascade_fixture()
+
+    run_ids = []
+    for _ in range(3):
+        publisher = RecordingPublisher()
+        launcher = InlineWorkerLauncher(
+            store,
+            emulator_client,
+            config,
+            publisher,
+            FakeGraph(pairs, texts),
+            scorer,
+            ScriptedLlm([_verdict_json()]),
+        )
+        request = GatekeeperRunRequest(
+            schema_version=SCHEMA_VERSION,
+            run_request_id=str(uuid.uuid4()),
+            intake_id=f"intake-{suffix}",
+            stage3_run_id=stage3_run_id,
+            gate=Gate.G1_NEUTRAL,
+            mode=RunMode.FULL,
+            triggered_by=TriggeredBy.OPERATOR,
+            request_timestamp="2026-07-19T04:15:00.000Z",
+        )
+        run_ids.append(request.run_request_id)
+
+        with TestClient(
+            create_app(_cascade_dispatcher(store, config, launcher, publisher)),
+            raise_server_exceptions=False,
+        ) as client:
+            _drive(client, publisher, request)
+
+    # Every run doc is still there, and each one still says what it did.
+    runs = [store.get(run_id) for run_id in run_ids]
+    assert all(run is not None for run in runs)
+    assert [run.state for run in runs] == [RunState.SUCCEEDED] * 3
+    assert all(run.superseded_by is None for run in runs)
+    # Three independent audit records, each with the full picture of its own run.
+    assert all(run.totals.pairs_seen == len(pairs) for run in runs)
+    assert len({run.run_request_id for run in runs}) == 3
+
+    # One edge row per pair still — the purge replaced the previous run's output rather
+    # than accumulating three generations of it.
+    written = list(emulator_client.collection(collections["edges"]).stream())
+    assert len(written) == len(pairs)
+    assert {doc.to_dict()["gkRunRequestId"] for doc in written} == {run_ids[2]}
+
+    # And the queue holds one row per pair, whatever the re-run count.
+    assert len(
+        PairQueue(emulator_client, collection=collections["queue"]).all_pairs(stage3_run_id)
+    ) == len(pairs)
+    assert runs[2].totals.pairs_seen == len(pairs)
 
 
 # --- the real graph ------------------------------------------------------------------------

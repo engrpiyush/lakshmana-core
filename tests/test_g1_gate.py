@@ -46,7 +46,7 @@ UNDECIDED = NliScores(entailment=0.50, neutral=0.49, contradiction=0.01)
 
 
 class FakeGraph:
-    """A Neo4j reader that answers the three cyphers `hydrate` issues, and nothing else."""
+    """A Neo4j reader that answers the four cyphers `hydrate` issues, and nothing else."""
 
     def __init__(self, pairs, texts, explanations=None):
         self.pairs = pairs
@@ -65,6 +65,24 @@ class FakeGraph:
                     "humanAsserted": pair.human_asserted,
                 }
                 for pair in self.pairs
+            ]
+        # The card query is checked before the explanation one: it *contains* the
+        # explanation sub-pattern, so the looser test would swallow it and hand G4 rows
+        # with no card fields on them.
+        if "c.speakerRole" in cypher:
+            return [
+                {
+                    "claimId": claim_id,
+                    "text": self.texts[claim_id],
+                    "type": "EMPLOYMENT",
+                    "sourceClass": "RESUME",
+                    "claimedDate": None,
+                    "relationship": None,
+                    "speakerRole": None,
+                    "explanationText": self.explanations.get(claim_id),
+                }
+                for claim_id in parameters["claimIds"]
+                if claim_id in self.texts
             ]
         source = self.explanations if "Explanation" in cypher else self.texts
         return [

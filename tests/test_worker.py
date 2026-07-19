@@ -60,14 +60,14 @@ def test_every_implemented_gate_resolves_to_its_own_runner() -> None:
 
     The import below reproduces the trigger; the assertion is that it no longer matters.
     """
+    from gatekeeper.enums import GATE_ORDER
     from gatekeeper.gates import g1  # noqa: F401  (the import that used to poison the load)
     from gatekeeper.worker.gates import runner_for
 
-    for gate in (Gate.G1_NEUTRAL, Gate.G2_CORROBORATION, Gate.G3_CONTRADICTION):
+    # All four, as of VA-102 — the cascade has no unimplemented gate left, so the no-op is
+    # now a runner nothing should ever resolve to.
+    for gate in GATE_ORDER:
         assert runner_for(gate) is not no_op_gate, f"{gate.value} resolved to the no-op gate"
-
-    # G4 genuinely is not built yet (VA-102), and the no-op is how that stays visible.
-    assert runner_for(Gate.G4_ESCALATION) is no_op_gate
 
 
 def test_the_no_op_gate_commits_against_the_emulator(

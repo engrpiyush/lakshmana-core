@@ -262,6 +262,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
+    { name = "google-auth" },
     { name = "google-cloud-firestore" },
     { name = "google-cloud-monitoring" },
     { name = "google-cloud-pubsub" },
@@ -295,6 +296,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.115.0" },
+    { name = "google-auth", specifier = ">=2.35.0" },
     { name = "google-cloud-firestore", specifier = ">=2.19.0" },
     { name = "google-cloud-monitoring", specifier = ">=2.22.0" },
     { name = "google-cloud-pubsub", specifier = ">=2.27.0" },
