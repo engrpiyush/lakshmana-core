@@ -1,172 +1,103 @@
-# HANDOFF — after session04 (VA-98 dispatcher · VA-99 G1_NEUTRAL)
+# HANDOFF — after session05 (VA-100 G2_CORROBORATION · VA-101 G3_CONTRADICTION)
 
-> Date: 2026-07-19 · Repo: lakshmana-core · LLD: page 255688733 **v1.5** (mirror synced, page version 6)
-> Session file: `execution-plan/session04.md` — **deleted**, the session is complete.
-> VA-98 and VA-99 → **In Review**.
-> Mode: **FINISH-ALL-CODE**. Nothing is parked. Five new DEFERRED-LIVE items (20–24).
-> Tests: **354 passed, 1 skipped** (the skip is the `neo4j`-marked cypher smoke; see below).
+> Date: 2026-07-19 · Repo: lakshmana-core · LLD: page 255688733 **v1.6** (mirror synced, page version 7)
+> Session file: `execution-plan/session05.md` — **deleted**, the session is complete.
+> VA-100 and VA-101 → **In Review**.
+> Mode: **FINISH-ALL-CODE**. Nothing is parked. Three new DEFERRED-LIVE items (25–27).
+> Tests: **375 passed, 1 skipped** — and the skip is now *fixable locally*, see item 27.
 
 ## The short version
 
-The cascade now runs end to end for its first gate. A Pub/Sub push reaches the dispatcher,
-which authenticates the caller, wins the claim transaction, and starts a worker; the worker
-purges, seeds its queue from the graph, scores both NLI directions in batches, applies
-`decide_g1`, writes verdicts, and publishes G2. A scheduled `/sweep` rescues anything that
-crashes on the way. All of it is proven against the Firestore emulator with the graph and
-the ONNX session stubbed — the two things a laptop cannot afford and the two things a
-deferred-live item covers.
+Three gates of the cascade now run end to end. One Pub/Sub push drives G1 → G2 → G3, each
+gate claiming its own lease, judging its own slice, committing, and publishing the next —
+`tests/test_e2e_cascade.py::test_the_chain_drives_itself_from_g1_through_g2_to_g3` feeds each
+published message back through the real dispatcher rather than calling the next gate directly,
+so the claim transaction is exercised three times over.
 
-**The one thing to read before anything else is the §7.3 correction below.** It is a real
-divergence between the LLD and the system it describes, I resolved it in the only way the
-hard rules allow, and it is the piece most worth your disagreement if you have any.
-
-## The §7.3 correction — the judge queue is not where the LLD said it was
-
-LLD §7.3 described the judge queue as a **Firestore collection owned by vishwamitra/MATCH**
-that lakshmana would add `tier` / `gate` / `leaseOwner` / `decidedBy` fields to, and §7.4
-listed "queue routing fields" among lakshmana's writes.
-
-It is not a Firestore collection. In vishwamitra the judge queue is a **Neo4j
-relationship** — `(:Claim)-[q:JUDGE_QUEUED {rank, blockScore, sources, humanAsserted,
-withContext, status}]->(:Claim)` — written wholesale by MATCH in
-`Stage3GraphRepository.applyMatchOutcome`, with `q.status` as the JUDGE phase's own cursor.
-
-That collides head-on with **D-8**: lakshmana's graph access is read-only by construction
-(RBAC user, `READ_ACCESS` sessions). The routing fields §7.3 asks for cannot be written
-where §7.3 puts them. Two constraints, both load-bearing, and only one design satisfies
-both.
-
-**What I did:** the routing lives in `gatekeeper_pairs`, a collection lakshmana owns
-outright, seeded from the graph as G1's second act. Doc id `{stage3RunId}|{low}|{high}`,
-so seeding is an idempotent upsert. Every property §7.3 actually wanted survives — per-pair
-tier, current gate, lease-based batch claiming, `decidedBy`, plus `contradictionFlag` so
-G1's escape hatch reaches G3 across two separately-scheduled executions. Two things the
-literal reading would have broken are preserved: the graph keeps its single writer, and
-vishwamitra's queue stays exactly as MATCH left it — so a rollback to `JudgeMode = LLM`
-needs nothing undone in the graph.
-
-I treated this as an implementation decision forced by the LLD's own invariants rather than
-a product decision, so I did not park it. **If you disagree, this is the thing to say so
-about** — it is one collection and one module (`gatekeeper/worker/queue.py`), and the gates
-above it do not care where routing lives. LLD §7.3/§7.4/§7.5 are rewritten, O‑8 is filed,
-and DEFERRED-LIVE 23 flags that a new collection now exists in the shared database.
+**G2** scores support in both claim-vs-claim directions and, where the paired claim has a
+source excerpt, additionally scores claim-vs-evidence — MiniCheck's native `(document, claim)`
+shape, and the one thing this cascade can do that the LLM judge could not. **G3** cross-checks
+contradiction across two model families, reading family A's logits back off the edge row rather
+than re-inferring them, and routes agreed candidates to the human queue without ever finalizing
+a CONTRADICTS verdict.
 
 ## What was built
 
-**VA-98 — dispatcher**
+- `gatekeeper/gates/g2.py` — claim batch → hydrate → score (both directions + grounding) →
+  `decide_g2` → edge write → route. Counters `seen, corroborates, forwarded, grounded,
+  flaggedPassThrough, truncated`.
+- `gatekeeper/gates/g3.py` — claim batch → read family A off `stageScores.g1` → score family B →
+  `decide_g3` → edge write → route. Counters `seen, neutral, humanRouted, escalated, truncated`.
+- `gatekeeper/integration.py::source_excerpts` — the `claims.sourceExcerpt` read G2's grounding
+  mode needs, chunked through `getAll`.
+- `gatekeeper/worker/edges.py` — `g2_stage_scores`, `g3_stage_scores`,
+  `g1_scores_from_stage_scores`, and `EdgeWriter.read_stage_scores` (direct gets by
+  deterministic key; no index).
+- `decisions.py` — `decide_g3` now sets `confidence` on its ROUTE_HUMAN decision. Added to the
+  *shared* function rather than the gate so replay parity holds by construction.
+- Config: `gatekeeper.integration.claims-collection` (env `GATEKEEPER_CLAIMS_COLLECTION`).
+- Tests: `test_g2_gate.py` (10), `test_g3_gate.py` (9), the three-gate chain, and a registry
+  regression test. LLD v1.6 on both the mirror and Confluence.
 
-- `dispatcher/oidc.py` — verifies the push/scheduler bearer token: signature via
-  `google.oauth2.id_token`, then the service-account allow-list. **Fails closed** (on by
-  default), rejects with **401** rather than 400 — a well-formed message from an
-  unacceptable caller is not a schema problem, and `GK_E_SCHEMA`/400 stays reserved for
-  payloads we cannot parse. An empty allow-list accepts any Google identity and warns on
-  every request; that is the pre-Terraform default, never the deployed one (DEFERRED-LIVE 21).
-- `dispatcher/jobs.py` — `CloudRunJobLauncher` (`run_v2.JobsClient.run_job`) passing the run
-  id, gate and lease owner as **container overrides**. Opt-in via
-  `gatekeeper.worker.execute-jobs` so a local dispatcher cannot reach the Run Admin API by
-  accident. Started and not awaited: a gate takes minutes, the push wants seconds.
-- `dispatcher/sweep.py` + `/sweep` — three passes: expired leases → `PENDING` + republish
-  (`sweepAttempt ≤ 3`, then `GK_E_STUCK`); idle runs → republish the actionable gate; DLQ
-  depth. Emits the `event="run_overdue"` line LK‑11's log metric filters on.
-- `clients/pubsub.py` — the chain publisher (synchronous: a worker that exited with the next
-  gate still in a client-side batch would stall the run until a sweep noticed).
-- `runs/store.py` — `active_runs()` and `rescue_gate()`, the transactional half of the sweep.
+## Three decisions worth knowing about
 
-**VA-99 — G1_NEUTRAL**
+**1. The source excerpt is in Firestore, not the graph.** The LLD said "the paired claim's
+source snippet" without saying where it lives. It is not in Neo4j at all —
+`Stage3GraphRepository.mergeEvidence` writes `text`/`basis`/`sourceClass` onto `:Claim` but
+never `sourceExcerpt`, and `:Source` carries no text. A graph read would have returned nothing
+for every pair and failed *silently*. It is read from vishwamitra's `claims` collection instead,
+read-only. New open item **O‑9** on the LLD, and DEFERRED-LIVE 26 asks for a coverage count on
+real data — if few claims carry an excerpt, grounding mode is decoration.
 
-- `worker/hydrate.py` — read-only cypher: the queue, claim text, explanation text. Reads the
-  **whole** queue rather than filtering on `q.status = 'QUEUED'`: that flag is vishwamitra's
-  JUDGE cursor, and in GATEKEEPER mode its JUDGE phase never runs, so it would be whatever
-  the last LLM run left behind. Lakshmana keeps its own cursor.
-- `worker/queue.py` — `gatekeeper_pairs`: seed, reset, batch-lease, route.
-- `worker/edges.py` — `stage3_edges` writes and the FROM_START purge.
-- `gates/g1.py` — the gate: purge → seed → batch loop (hydrate, dual-direction NLI, decide,
-  write, route) → counters. SHADOW writes `shadow.*` only.
-- `worker/main.py` — publishes the next gate after committing, never before.
+**2. G3's edge row does carry `relation = CONTRADICTS`, and this is not a violation of "the
+cascade never finalizes CONTRADICTS".** They are different layers, and getting this wrong in
+either direction is expensive. On the **queue** row the pair leaves with `tier = HUMAN` and no
+`decidedBy` — that field is what asserts the cascade settled a pair, and G3 never sets it. On
+the **edge** row `relation` is a pair-level *candidate*: vishwamitra's `FactAssembler` lifts
+CORROBORATES/CONTRADICTS pair rows into Fact edges and stamps every contradiction
+`reviewStatus = PROPOSED`, which is exactly what the §11.10 human queue reads. Writing nothing
+would have made confirmed contradictions **invisible** to the queue built to review them. That
+is the DoD's "visible to the existing contradiction-queue reader", and it is tested against the
+fields the assembler actually consumes.
 
-## Decisions worth knowing about
+**3. The candidate's confidence is `min(famA, famB)`, the weaker family.** §8 gives ROUTE_HUMAN
+no confidence, but the §11.10 queue orders and floors on one. A two-family agreement is only as
+strong as the family least convinced by it; `max` would let one confident model push a pair the
+other barely flagged to the top of a human's worklist — the self-consistency failure this
+cross-check exists to replace.
 
-**One `stage3_edges` row per pair, not per gate.** §7.2's `stageScores: {g1, g2, g3}` only
-makes sense as a single document each gate merges its slot into. Doc id
-`{low}|{high}|{bare|ctx}|GK` — vishwamitra's own `(pair, variant, promptStamp)` shape with
-`GK` in the stamp position, so a gatekeeper row can never collide with an ensemble one.
-Writes are `merge=True` upserts, which is what makes `maxRetries 1` safe and what lets a
-crashed gate resume without duplicating a row.
+## Two bugs found and fixed on the way
 
-**A forwarded pair still gets a row.** Not a verdict — `relation` is left untouched — but its
-`stageScores.g1`, because §7.2 wants full precision retained for recalibration and because
-G3's cross-check reads G1's contradiction logits back out of it.
+**The gate registry silently disabled G2 and G3.** `_load_implementations` guarded on
+`if _RUNNERS:` — but each gate module registers itself on import, so anything importing
+`gatekeeper.gates.g1` directly (the replay harness, half the test suite) left the registry
+non-empty and the guard concluded "already loaded". Every other gate then resolved to
+`no_op_gate`, **which commits successfully**: a full cascade would have run G1 for real, committed
+zeroes for G2 and G3, and reported SUCCEEDED having skipped two thirds of the judging. Now a
+dedicated `_LOADED` flag, with a regression test that reproduces the trigger.
 
-**`attempt == 1` is FROM_START.** The run doc's `mode` field cannot distinguish a fresh run
-from a FROM_GATE retrigger: only a FULL/G1 message creates a doc, and nothing rewrites
-`mode` afterwards. But a new `runRequestId` is the *only* thing that creates a run doc, and
-creation claims G1 at attempt 1 — so first attempt means new run, purge; any later G1
-execution is resuming output the purge would destroy. The purge stays idempotent regardless.
+**The real-Neo4j test could never run.** `test_the_hydration_cypher_runs_against_a_real_neo4j`
+called `load_config({})` — an empty env map — so `GATEKEEPER_NEO4J_PASSWORD` could never arrive
+and it skipped unconditionally, including in session04's "0 skipped" claim. Now `load_config()`.
+Verified passing against the running container. It still skips in this repo because the password
+is not in the settings env — see DEFERRED-LIVE 27, a one-line owner fix.
 
-**Sweeper pass (b) was describing an unreachable state.** §11 said "`REQUESTED` runs with no
-claim after 30 min". A `REQUESTED` doc cannot exist — the dispatcher creates the doc *by*
-claiming, which sets it `RUNNING`. The reachable version of that hazard is the commit-then-
-publish crash window, so pass (b) now republishes the first `PENDING` gate whose predecessor
-`SUCCEEDED`. Skipped entirely when pass (a) rescued something on the same run, so one gate
-never gets two messages from one sweep. LLD §11 updated.
+## State
 
-**The purge has two guards, not one.** It is the only method in the codebase that deletes
-another service's data. Scoped to `stage3RunId` (a field only lakshmana writes on its own
-rows) *and* every candidate's `method` is re-checked against the `GK_*` set before the
-delete is queued. A test plants an `ENSEMBLE` row with our `stage3RunId` and asserts it
-survives.
+- **375 passed, 1 skipped.** The skip is the `neo4j` cypher smoke; set
+  `GATEKEEPER_NEO4J_PASSWORD=vishwamitra-dev` and it passes (0 skipped, verified).
+- Both Docker images build. Ruff clean and formatted.
+- Nothing parked. No live GCP touched, no infra mutated, no commits made.
 
-## What is proven, and what is not
+## What's next — session06 (VA-102 G4_ESCALATION · VA-103 FINALIZE)
 
-Proven against the emulator, in `tests/test_g1_gate.py` and `tests/test_e2e_cascade.py`:
+`execution-plan/session06.md` is the next file. G4 is the first gate that spends money: pinned
+flash-lite, k=1, `maxLlmPairs` cap, `WOULD_ESCALATE_LLM` in SHADOW, and a dry-run double locally
+per the FINISH-ALL-CODE rule (the live spot-check is DEFERRED-LIVE 5). It plugs into exactly the
+same seams G2 and G3 used — `gates/g4.py` + `register()`, `GateContext.scorer_factory` swapped
+for a Vertex client — and `runner_for(G4_ESCALATION)` still resolves to `no_op_gate`, which is
+the signal that it is genuinely not built yet. FINALIZE computes `totals` and sets the run
+SUCCEEDED; it publishes nothing.
 
-- **The escape hatch holds through the wiring**, not just inside `decide_g1` — 60 pairs with
-  hostile score shapes (overwhelming neutral beside a small contradiction), and not one
-  flagged pair is decided at G1.
-- **A crash mid-batch resumes cleanly** — the first batch's work stays durable, only the
-  remainder is re-scored, no pair is duplicated, one edge row per pair.
-- **Replay parity** — the gate loop and the VA-97 harness reach the same disposition from the
-  same scores and the same `configSnapshot`. A wiring check by construction, exactly as the
-  DoD framed it: both drive `gates/decisions.py`.
-- **The full push → claim → G1 → publish-G2 path**, through a real envelope and a real claim
-  transaction.
-
-Not proven, and honestly so:
-
-- The **graph is a fake** in every gate test. I did verify the three hydration cyphers parse
-  and execute against the real `vishwamitra-neo4j` 5.26 container, read-only, with a subject
-  id that matches nothing — that is the `neo4j`-marked test, and it **skips** unless
-  `GATEKEEPER_NEO4J_PASSWORD` is set (dev default `vishwamitra-dev`). Nothing was written to
-  your dev graph.
-- **No model has ever run through this gate.** The scorer is stubbed everywhere. Per CLAUDE.md
-  rule 0 I did not run inference; the scorer itself was exercised in session02/03.
-- The queue's index-free query is emulator-proven only. If production disagrees the fix is one
-  composite index — DEFERRED-LIVE 24.
-
-## New DEFERRED-LIVE items
-
-| # | Item |
-| --- | --- |
-| 20 | `gatekeeper-dispatcher-sa` needs `roles/monitoring.viewer` for the DLQ-depth read (best-effort; the rescue passes work without it) |
-| 21 | Configure the OIDC allow-list + audience |
-| 22 | Live spot-check the Run Jobs launcher — **and keep the three env vars out of the job's own env** |
-| 23 | `gatekeeper_pairs` is a new collection in the shared database; no index required |
-| 24 | Confirm the index-free queue query in production |
-
-## What is next
-
-`execution-plan/session05.md` — **VA-100 (G2_CORROBORATION) + VA-101 (G3_CONTRADICTION)**.
-Most of the hard parts are done: the gate registry, the context, the queue, the edge writer
-and the chain all exist and are gate-agnostic. G2 and G3 should be `gates/g2.py` and
-`gates/g3.py` plus registration, following `gates/g1.py`'s shape.
-
-Two things session05 must not get wrong, both already written down in the LLD:
-
-- **G2 may not finalize CORROBORATES on a contradiction-flagged pair** (§8, "Gate ordering for
-  flagged pairs"). The flag is on `gatekeeper_pairs.contradictionFlag`; `run_cascade` in the
-  replay harness already implements the skip and is the reference.
-- **G3 needs G1's contradiction logits**, which live in `stage3_edges.stageScores.g1` — that is
-  why a forwarded pair still gets a row. Read them back; do not re-score with the G1 model.
-
-Commits are yours — the message is in the session log. Nothing is parked and nothing is
-waiting on you before session05 can run.
+Watch for: G4's counters are the last input to `totals`, and `run_gate` currently logs
+"last gate committed; FINALIZE is pending VA-103" instead of finalizing.

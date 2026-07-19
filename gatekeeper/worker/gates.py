@@ -101,6 +101,8 @@ def no_op_gate(context: GateContext) -> dict[str, Any]:
 
 
 _RUNNERS: dict[Gate, GateRunner] = {}
+_LOADED: set[str] = set()
+"""Whether the gate modules have been imported — mutated, never rebound, so no ``global``."""
 
 
 def runner_for(gate: Gate) -> GateRunner:
@@ -119,7 +121,16 @@ def _load_implementations() -> None:
 
     Deferred so that importing this registry does not drag in the scorer — and through it
     ONNX Runtime — for a process that only wants to know a gate's name.
+
+    The guard is a dedicated flag and **not** ``if _RUNNERS``. A gate module registers
+    itself on import, so anything that imports one directly — a test, the replay harness,
+    a tool reaching for `run_g1` — leaves the registry non-empty without any of the others
+    having been loaded. Treating that as "already loaded" silently resolved every other
+    gate to the no-op: a full cascade would run G1 for real and then commit zeroes for
+    G2 and G3, succeeding all the way to FINALIZE with two thirds of the judging skipped.
     """
-    if _RUNNERS:
+    if _LOADED:
         return
-    from gatekeeper.gates import g1  # noqa: F401  (imported for its registration)
+    from gatekeeper.gates import g1, g2, g3  # noqa: F401  (imported for their registration)
+
+    _LOADED.add("gates")

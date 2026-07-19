@@ -24,6 +24,7 @@ split-brain bug rather than a report.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -31,8 +32,9 @@ from google.cloud import firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
 
 from gatekeeper.enums import GATEKEEPER_METHODS, EscalationReason, JudgeMode, Method, Verdict
+from gatekeeper.gates.decisions import G1Scores
 from gatekeeper.logging import get_logger
-from gatekeeper.scoring.encoder import NliScores
+from gatekeeper.scoring.encoder import GroundingScore, NliScores
 
 __all__ = [
     "DEFAULT_COLLECTION",
@@ -40,7 +42,10 @@ __all__ = [
     "EdgeVerdict",
     "EdgeWriter",
     "edge_key",
+    "g1_scores_from_stage_scores",
     "g1_stage_scores",
+    "g2_stage_scores",
+    "g3_stage_scores",
 ]
 
 log = get_logger(__name__)
@@ -48,6 +53,7 @@ log = get_logger(__name__)
 DEFAULT_COLLECTION = "stage3_edges"
 
 _WRITE_BATCH_LIMIT = 400
+_READ_CHUNK = 300
 
 
 GATEKEEPER_STAMP = "GK"
@@ -97,6 +103,82 @@ def g1_stage_scores(
             abs(context_backward.neutral - backward.neutral),
         )
     return scores
+
+
+def g2_stage_scores(
+    forward: GroundingScore,
+    backward: GroundingScore,
+    grounded_forward: GroundingScore | None = None,
+    grounded_backward: GroundingScore | None = None,
+) -> dict[str, float]:
+    """``stageScores.g2`` — §8's ``supportFwd`` / ``supportBwd`` / ``supportGrounded``.
+
+    Both grounded orientations are stored rather than only the one that won. §8 names a
+    single optional ``supportGrounded?`` and :func:`~gatekeeper.gates.decisions.decide_g2`
+    reads a single number, but which orientation produced it is exactly what a calibration
+    pass needs to know — "claim A is supported by B's evidence" and its converse are
+    different questions, and a report that cannot tell them apart cannot fit a curve for
+    either. ``supportGrounded`` stays as the value the decision actually saw.
+    """
+    scores: dict[str, float] = {
+        "supportFwd": forward.support,
+        "supportBwd": backward.support,
+    }
+    if grounded_forward is not None:
+        scores["supportGroundedFwd"] = grounded_forward.support
+    if grounded_backward is not None:
+        scores["supportGroundedBwd"] = grounded_backward.support
+
+    available = [score for score in (grounded_forward, grounded_backward) if score is not None]
+    if available:
+        scores["supportGrounded"] = max(score.support for score in available)
+    return scores
+
+
+def g3_stage_scores(forward: NliScores, backward: NliScores) -> dict[str, float]:
+    """``stageScores.g3`` — the second family's logits, named as §8's ``decide_g3`` reads them.
+
+    ``conFwdB`` / ``conBwdB`` keep §8's own ``B`` suffix so the family a number came from is
+    legible in the stored row; family A is already on the same document under ``g1``, which
+    is the whole reason G3 never re-runs the first model.
+    """
+    return {
+        "entFwdB": forward.entailment,
+        "entBwdB": backward.entailment,
+        "neuFwdB": forward.neutral,
+        "neuBwdB": backward.neutral,
+        "conFwdB": forward.contradiction,
+        "conBwdB": backward.contradiction,
+    }
+
+
+def g1_scores_from_stage_scores(stage_scores: dict[str, Any]) -> G1Scores | None:
+    """Rebuild G1's family-A scores from a stored ``stageScores.g1`` map.
+
+    §8: "G1's contradiction logits are already in ``stageScores``" — so G3 reads them back
+    instead of paying for a second pass over the first model. Returns ``None`` when the map
+    is absent or incomplete; the caller decides what that means, and for G3 it is a hard
+    failure rather than a re-inference, because a cross-check that quietly re-derives one of
+    its two families is not a cross-check.
+
+    The contexted variant is deliberately not reconstructed: only ``ctxDelta`` survives on
+    the row, not the four probabilities behind it, and ``decide_g3`` reads neither.
+    """
+    required = ("entFwd", "entBwd", "neuFwd", "neuBwd", "conFwd", "conBwd")
+    if not stage_scores or any(key not in stage_scores for key in required):
+        return None
+    return G1Scores(
+        forward=NliScores(
+            entailment=float(stage_scores["entFwd"]),
+            neutral=float(stage_scores["neuFwd"]),
+            contradiction=float(stage_scores["conFwd"]),
+        ),
+        backward=NliScores(
+            entailment=float(stage_scores["entBwd"]),
+            neutral=float(stage_scores["neuBwd"]),
+            contradiction=float(stage_scores["conBwd"]),
+        ),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,6 +299,29 @@ class EdgeWriter:
         if pending:
             batch.commit()
         return written
+
+    def read_stage_scores(self, keys: Sequence[str], slot: str) -> dict[str, dict[str, Any]]:
+        """``{docId: stageScores[slot]}`` for the keys given, skipping rows without that slot.
+
+        Direct gets by deterministic id — the same key :func:`edge_key` built when the
+        earlier gate wrote the row — so this is one round trip per chunk and needs no index.
+
+        Read from the row's own ``stageScores``, which :meth:`EdgeVerdict.to_firestore`
+        writes in **both** judge modes. Reading ``shadow.stageScores`` instead would make
+        G3 work in GATEKEEPER mode and silently starve in SHADOW, where the cross-check is
+        the entire point of the run.
+        """
+        found: dict[str, dict[str, Any]] = {}
+        unique = sorted(set(keys))
+        for start in range(0, len(unique), _READ_CHUNK):
+            refs = [self._collection.document(key) for key in unique[start : start + _READ_CHUNK]]
+            for snapshot in self._client.get_all(refs):
+                if not snapshot.exists:
+                    continue
+                scores = ((snapshot.to_dict() or {}).get("stageScores") or {}).get(slot)
+                if isinstance(scores, dict):
+                    found[snapshot.id] = scores
+        return found
 
     def purge(self, stage3_run_id: str) -> int:
         """Delete this run's gatekeeper rows — G1's first act on FROM_START (LLD §10).

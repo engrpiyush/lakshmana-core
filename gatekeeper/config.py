@@ -188,6 +188,13 @@ SETTINGS: tuple[Setting, ...] = (
         "stage3_edges",
         str,
     ),
+    # G2's grounding mode needs the verbatim text a claim was extracted from. It is not in
+    # the graph — vishwamitra's evidence projection does not carry `sourceExcerpt` onto the
+    # `:Claim` node — so it is read from the `claims` collection instead, read-only like
+    # every other vishwamitra-owned read (§7.4).
+    Setting(
+        "gatekeeper.integration.claims-collection", "GATEKEEPER_CLAIMS_COLLECTION", "claims", str
+    ),
     Setting("gatekeeper.queue.collection", "GATEKEEPER_QUEUE_COLLECTION", "gatekeeper_pairs", str),
     Setting("gatekeeper.queue.batch-size", "GATEKEEPER_QUEUE_BATCH_SIZE", 32, int),
     Setting("gatekeeper.queue.lease-minutes", "GATEKEEPER_QUEUE_LEASE_MINUTES", 15, int),

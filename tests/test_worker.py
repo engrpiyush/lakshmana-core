@@ -48,6 +48,28 @@ def _run(store, emulator_client, run_request_id, gate, owner=OWNER, publisher=No
     )
 
 
+def test_every_implemented_gate_resolves_to_its_own_runner() -> None:
+    """The registry must not resolve an implemented gate to the no-op (VA-100/VA-101).
+
+    Regression test for a lazy-import guard that read "any gate registered" as "all gates
+    loaded". Because each gate module registers itself on import, importing one directly —
+    which the replay harness and half these tests do — was enough to make every *other*
+    gate resolve to `no_op_gate`. That failure is invisible by construction: the no-op
+    commits successfully, so a full cascade would run G1, commit zeroes for G2 and G3, and
+    report SUCCEEDED having skipped two thirds of the judging.
+
+    The import below reproduces the trigger; the assertion is that it no longer matters.
+    """
+    from gatekeeper.gates import g1  # noqa: F401  (the import that used to poison the load)
+    from gatekeeper.worker.gates import runner_for
+
+    for gate in (Gate.G1_NEUTRAL, Gate.G2_CORROBORATION, Gate.G3_CONTRADICTION):
+        assert runner_for(gate) is not no_op_gate, f"{gate.value} resolved to the no-op gate"
+
+    # G4 genuinely is not built yet (VA-102), and the no-op is how that stays visible.
+    assert runner_for(Gate.G4_ESCALATION) is no_op_gate
+
+
 def test_the_no_op_gate_commits_against_the_emulator(
     store, claimed, emulator_client, monkeypatch
 ) -> None:

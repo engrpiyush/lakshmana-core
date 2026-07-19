@@ -20,6 +20,9 @@ resolved toward escalation rather than toward silently deciding a pair:
   argmax in both directions of both families* — the strictest available reading. A looser
   one would let a pair the two families disagree about be discarded as NEUTRAL, and the
   whole point of the cross-check is that it does not.
+* the **confidence on a G3 contradiction candidate** (VA-101) has no pseudocode at all,
+  and the §11.10 human queue both orders and floors on it. It is the weaker family's
+  score — see :func:`decide_g3`.
 """
 
 from __future__ import annotations
@@ -285,6 +288,15 @@ def decide_g3(g1: G1Scores, g3: G3Scores, thresholds: Thresholds) -> Decision:
             method=Method.GK_G3_XCHECK,
             escalation_reason=EscalationReason.CONTRADICTION_SIGNAL,
             contradiction_flag=True,
+            # The *weaker* family, not the stronger one and not their mean. This number
+            # orders the §11.10 human queue and is filtered by its confidence floor, so
+            # it has to mean "how much agreement is there", and a two-family agreement is
+            # only as strong as the family that is least convinced. Taking the max would
+            # let one confident model push a pair the other barely flagged to the top of
+            # a human's worklist — precisely the self-consistency failure the cross-check
+            # replaces. Like `neutralConsensus`, §8's pseudocode leaves this open; it is
+            # resolved toward the conservative reading.
+            confidence=min(family_a, family_b),
             truncated=truncated,
             notes={"familyA": family_a, "familyB": family_b, "candidate": "CONTRADICTS"},
         )

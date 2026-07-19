@@ -21,9 +21,58 @@ from gatekeeper.config import Config
 from gatekeeper.enums import JudgeMode
 from gatekeeper.logging import get_logger
 
-__all__ = ["resolve_judge_mode", "resolve_subject_id"]
+__all__ = ["resolve_judge_mode", "resolve_subject_id", "source_excerpts"]
 
 log = get_logger(__name__)
+
+_GET_ALL_CHUNK = 300
+"""``getAll`` is one round trip per chunk; Firestore's own limit is higher than we need."""
+
+
+def source_excerpts(
+    client: firestore.Client, config: Config, claim_ids: list[str]
+) -> dict[str, str]:
+    """``{claimId: sourceExcerpt}`` — the evidence text G2's grounding mode scores against.
+
+    ``sourceExcerpt`` is the verbatim printed text a claim was extracted from (vishwamitra
+    Stage 2, ``ClaimExtractor``). It is what makes MiniCheck's native ``(document, claim)``
+    input shape reachable at all: it is *evidence*, where the claim text on both sides of a
+    pair is two assertions.
+
+    **It is read from Firestore rather than the graph, and that is not an accident.**
+    Vishwamitra's evidence projection (``Stage3GraphRepository.mergeEvidence``) writes
+    ``text``/``basis``/``sourceClass`` onto ``:Claim`` but not ``sourceExcerpt``, and the
+    ``:Source`` node carries only ``assetId``/``contentType``/``checksum`` — no text at all.
+    So the excerpt simply is not in Neo4j, and asking the graph for it would return nothing
+    for every pair rather than failing visibly. The `claims` collection is the authority
+    (``ClaimRepository.COLLECTION``), keyed by claim id, which is the same id the graph uses
+    (vishwamitra stage3 LLD §9.1: ``claimId`` UNIQUE = Firestore id).
+
+    Missing excerpts are **normal**, not an error: a claim extracted from audio may have no
+    printed text behind it. G2 falls back to the two claim-vs-claim directions for those,
+    which is the ``groundingMode = AUTO`` contract.
+    """
+    unique = sorted({claim_id for claim_id in claim_ids if claim_id})
+    if not unique:
+        return {}
+
+    collection = client.collection(config.get_str("gatekeeper.integration.claims-collection"))
+    excerpts: dict[str, str] = {}
+    for start in range(0, len(unique), _GET_ALL_CHUNK):
+        chunk = unique[start : start + _GET_ALL_CHUNK]
+        refs = [collection.document(claim_id) for claim_id in chunk]
+        for snapshot in client.get_all(refs):
+            if not snapshot.exists:
+                continue
+            excerpt = (snapshot.to_dict() or {}).get("sourceExcerpt")
+            if isinstance(excerpt, str) and excerpt.strip():
+                excerpts[snapshot.id] = excerpt
+
+    log.info(
+        "read source excerpts for grounding",
+        fields={"requested": len(unique), "found": len(excerpts)},
+    )
+    return excerpts
 
 
 def resolve_subject_id(client: firestore.Client, config: Config, stage3_run_id: str) -> str:
