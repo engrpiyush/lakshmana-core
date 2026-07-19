@@ -22,7 +22,7 @@ from google.cloud import firestore
 
 from gatekeeper.config import load_config
 from gatekeeper.contracts.payload import SCHEMA_VERSION, GatekeeperRunRequest
-from gatekeeper.enums import Gate, RunMode, TriggeredBy
+from gatekeeper.enums import Gate, JudgeMode, RunMode, TriggeredBy
 from gatekeeper.runs.store import GatekeeperRunStore
 
 FIXTURES_DIR = Path(__file__).resolve().parent.parent / "contracts" / "fixtures"
@@ -79,6 +79,24 @@ def store(emulator_client: firestore.Client, runs_collection: str) -> Gatekeeper
 def config_snapshot() -> dict:
     """The frozen config a run would be created with."""
     return load_config({}).snapshot()
+
+
+@pytest.fixture
+def claimed(store, make_request, config_snapshot):
+    """A run whose G1 gate is claimed and waiting for a worker.
+
+    Shared by the worker, sweeper and gate tests: every one of them starts from "the
+    dispatcher already won the claim", because that is the only state a worker ever sees.
+    """
+    request = make_request()
+    result = store.claim_gate(
+        request,
+        lease_owner="worker/test/task-0",
+        judge_mode=JudgeMode.GATEKEEPER,
+        config_snapshot=config_snapshot,
+    )
+    assert result.claimed
+    return request
 
 
 @pytest.fixture

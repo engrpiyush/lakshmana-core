@@ -15,9 +15,11 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from gatekeeper.clients.pubsub import RecordingPublisher
 from gatekeeper.config import load_config
 from gatekeeper.contracts.payload import GatekeeperRunRequest
 from gatekeeper.dispatcher.app import Dispatcher, create_app
+from gatekeeper.dispatcher.oidc import OidcVerifier, TokenRejectedError
 from gatekeeper.enums import Gate, JudgeMode
 from gatekeeper.errors import ErrorCode, FirestoreTxnError
 from gatekeeper.runs.store import ClaimRejection, ClaimResult
@@ -48,13 +50,23 @@ class FakeLauncher:
         return "execution-1"
 
 
-def _client(store, launcher=None, judge_mode=JudgeMode.GATEKEEPER):
+def _client(
+    store,
+    launcher=None,
+    judge_mode=JudgeMode.GATEKEEPER,
+    verifier=None,
+    publisher=None,
+):
     dispatcher = Dispatcher(
         store=store,
         config=load_config({}),
         launcher=launcher or FakeLauncher(),
         judge_mode_resolver=lambda _: judge_mode,
         lease_owner_factory=lambda: "dispatcher/test/owner",
+        # These tests are about the protocol, not the transport's authentication; the
+        # OIDC path has its own tests below and in tests/test_oidc.py.
+        verifier=verifier or OidcVerifier(required=False),
+        publisher=publisher,
     )
     return TestClient(create_app(dispatcher), raise_server_exceptions=False)
 
@@ -204,3 +216,60 @@ def test_transaction_contention_asks_for_a_redelivery() -> None:
     assert response.status_code == 500
     assert response.json()["errorCode"] == ErrorCode.GK_E_FIRESTORE_TXN.value
     assert launcher.calls == []
+
+
+# -- OIDC ---------------------------------------------------------------------
+
+
+class RejectingVerifier:
+    """Stands in for a real verifier that dislikes the token it was given."""
+
+    def verify(self, authorization):
+        raise TokenRejectedError("no token")
+
+
+def test_an_unauthenticated_push_is_rejected_without_claiming() -> None:
+    """401 before the transaction: an unauthenticated caller must not move a gate."""
+    store = FakeStore(ClaimResult(True))
+    launcher = FakeLauncher()
+
+    with _client(store, launcher, verifier=RejectingVerifier()) as client:
+        response = client.post("/pubsub/push", json=_envelope(_payload()))
+
+    assert response.status_code == 401
+    assert store.calls == []
+    assert launcher.calls == []
+
+
+def test_an_unauthenticated_sweep_is_rejected() -> None:
+    with _client(FakeStore(ClaimResult(True)), verifier=RejectingVerifier()) as client:
+        response = client.post("/sweep")
+
+    assert response.status_code == 401
+
+
+# -- sweep --------------------------------------------------------------------
+
+
+class EmptyStore:
+    """A store with nothing to sweep."""
+
+    def active_runs(self):
+        return []
+
+
+def test_sweep_reports_an_empty_pass() -> None:
+    with _client(EmptyStore(), publisher=RecordingPublisher()) as client:
+        response = client.post("/sweep")
+
+    assert response.status_code == 200
+    assert response.json()["scanned"] == 0
+
+
+def test_sweep_without_a_publisher_refuses_rather_than_stranding_gates() -> None:
+    """A rescue that cannot republish would leave a gate PENDING and undriven."""
+    with _client(EmptyStore()) as client:
+        response = client.post("/sweep")
+
+    assert response.status_code == 503
+    assert response.json()["errorCode"] == "GK_E_SWEEP_UNCONFIGURED"

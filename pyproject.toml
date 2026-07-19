@@ -18,6 +18,9 @@ dependencies = [
     "onnxruntime>=1.20.0",
     "tokenizers>=0.21.0",
     "numpy>=2.1.0",
+    "google-cloud-pubsub>=2.27.0",
+    "google-cloud-run>=0.10.0",
+    "google-cloud-monitoring>=2.22.0",
 ]
 
 [project.optional-dependencies]
@@ -81,6 +84,17 @@ ignore = ["PLR0911", "PLR0912", "PLR0913"]
 # — the field map, the record shape, the JSONL round trip — stays importable without the
 # SDK, which is what lets the exporter's logic be tested without an emulator.
 "gatekeeper/replay/corpus.py" = ["PLC0415"]
+# Google clients constructed only on the deployed path. Deferring them keeps the Pub/Sub,
+# Monitoring, Run Admin and google-auth transports out of every local test run — the tests
+# drive these seams through their in-memory doubles, and importing a client at module
+# scope would make `import gatekeeper.dispatcher.app` reach for ADC.
+"gatekeeper/clients/pubsub.py" = ["PLC0415"]
+"gatekeeper/dispatcher/jobs.py" = ["PLC0415"]
+"gatekeeper/dispatcher/oidc.py" = ["PLC0415"]
+# The gate registry imports its implementations lazily so that merely asking "what runs
+# G2?" does not pull in the scorer, and through it ONNX Runtime. The gate modules import
+# the registry to register themselves, so the reverse edge has to be deferred anyway.
+"gatekeeper/worker/gates.py" = ["PLC0415"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

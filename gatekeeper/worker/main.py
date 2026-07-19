@@ -13,15 +13,18 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Callable
 
 from gatekeeper import __version__
 from gatekeeper.clients.firestore import firestore_client
+from gatekeeper.clients.pubsub import Publisher, publisher_for
 from gatekeeper.config import Config, load_config
-from gatekeeper.enums import Gate, next_gate
+from gatekeeper.enums import Gate, TriggeredBy, next_gate
 from gatekeeper.errors import GatekeeperError
 from gatekeeper.logging import configure_logging, get_logger, log_context
+from gatekeeper.runs.model import GatekeeperRun
 from gatekeeper.runs.store import GatekeeperRunStore
-from gatekeeper.worker.gates import runner_for
+from gatekeeper.worker.gates import GateContext, runner_for
 
 __all__ = ["main", "run_gate"]
 
@@ -32,8 +35,16 @@ EXIT_BAD_INVOCATION = 2
 EXIT_GATE_FAILED = 1
 
 
-def run_gate(store: GatekeeperRunStore, run_request_id: str, gate: Gate, lease_owner: str) -> int:
-    """Execute one gate and settle it. Returns a process exit code.
+def run_gate(
+    store: GatekeeperRunStore,
+    run_request_id: str,
+    gate: Gate,
+    lease_owner: str,
+    *,
+    context_factory: Callable[[GatekeeperRun], GateContext],
+    publisher: Publisher | None = None,
+) -> int:
+    """Execute one gate, settle it, and publish the next. Returns a process exit code.
 
     A gate that raises is recorded FAILED with its ``GK_E_*`` code and the run goes
     FAILED with it — no automatic retry. The operator fixes the data or config and
@@ -54,8 +65,9 @@ def run_gate(store: GatekeeperRunStore, run_request_id: str, gate: Gate, lease_o
         )
         return EXIT_BAD_INVOCATION
 
+    context = context_factory(run)
     try:
-        counters = runner_for(gate)(run, gate)
+        counters = runner_for(gate)(context)
     except GatekeeperError as exc:
         log.error(
             "gate failed",
@@ -70,6 +82,8 @@ def run_gate(store: GatekeeperRunStore, run_request_id: str, gate: Gate, lease_o
             error_detail=exc.detail,
         )
         return EXIT_GATE_FAILED
+    finally:
+        context.close()
 
     if not store.commit_gate(run_request_id, gate, lease_owner=lease_owner, counters=counters):
         log.warning("gate commit was rejected; not publishing the next gate")
@@ -77,15 +91,20 @@ def run_gate(store: GatekeeperRunStore, run_request_id: str, gate: Gate, lease_o
 
     log.info("gate committed", fields={"counters": counters})
 
+    # Commit first, publish second — always. The window between them is a crash the
+    # sweeper rescues; the reverse order would let a redelivery double-run a gate whose
+    # result was never recorded (LLD §5).
     following = next_gate(gate)
     if following is None:
         # After G4 comes FINALIZE, which is internal and publishes nothing (LLD §8).
         log.info("last gate committed; FINALIZE is pending VA-103")
-    else:
-        # Chain publishing lands with the dispatcher/G1 ticket (VA-98/VA-99).
-        log.info(
-            "next gate is pending VA-98 chain publishing", fields={"nextGate": following.value}
+    elif publisher is None:
+        log.warning(
+            "no publisher configured; the chain stops here",
+            fields={"nextGate": following.value},
         )
+    else:
+        publisher.publish(run.to_request(following, triggered_by=TriggeredBy.SYSTEM))
 
     return EXIT_OK
 
@@ -130,7 +149,20 @@ def main(argv: list[str] | None = None) -> int:
         store = GatekeeperRunStore(
             client, lease_minutes=config.get_int("gatekeeper.lease.gate-minutes")
         )
-        return run_gate(store, run_request_id, gate, lease_owner)
+        return run_gate(
+            store,
+            run_request_id,
+            gate,
+            lease_owner,
+            context_factory=lambda run: GateContext(
+                run=run,
+                gate=gate,
+                config=config,
+                client=client,
+                lease_owner=lease_owner,
+            ),
+            publisher=publisher_for(config),
+        )
 
 
 if __name__ == "__main__":

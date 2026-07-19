@@ -34,7 +34,7 @@ from gatekeeper.logging import get_logger
 from gatekeeper.runs.model import COLLECTION, GatekeeperRun, RunTotals
 from gatekeeper.timeutil import utc_now
 
-__all__ = ["ClaimRejection", "ClaimResult", "GatekeeperRunStore"]
+__all__ = ["ClaimRejection", "ClaimResult", "GatekeeperRunStore", "SweepOutcome"]
 
 log = get_logger(__name__)
 
@@ -46,6 +46,19 @@ _TXN_RETRY_ROUNDS = 4
 _TXN_BACKOFF_SECONDS = 0.05
 
 _TERMINAL_GATE_STATES = frozenset({GateState.SUCCEEDED, GateState.SKIPPED})
+
+
+class SweepOutcome(StrEnum):
+    """What a sweep did to one gate (LLD §11)."""
+
+    RESCUED = "RESCUED"
+    """Crashed work returned to PENDING for republishing."""
+
+    STUCK = "STUCK"
+    """Sweeps exhausted — gate and run FAILED with ``GK_E_STUCK``."""
+
+    REPUBLISHED = "REPUBLISHED"
+    """Nothing was wrong with the doc; the *message* went missing, so it is re-sent."""
 
 
 class ClaimRejection(StrEnum):
@@ -426,6 +439,89 @@ class GatekeeperRunStore:
             return True
 
         return self._commit(_settle)
+
+    # -- sweep ----------------------------------------------------------------
+
+    def active_runs(self) -> list[GatekeeperRun]:
+        """Every run the sweeper might have to act on.
+
+        Filtered on ``state`` alone and never on the gate map: Firestore cannot query
+        inside ``gates.*`` without an index per gate, and the set of non-terminal runs is
+        small by construction (one per in-flight intake). Narrowing in Python is the same
+        trade ``_non_terminal_predecessors`` makes.
+        """
+        runs: list[GatekeeperRun] = []
+        for state in (RunState.REQUESTED, RunState.RUNNING):
+            query = self._collection.where(filter=FieldFilter("state", "==", state.value))
+            runs.extend(GatekeeperRun.from_firestore(doc.to_dict()) for doc in query.get())
+        return runs
+
+    def rescue_gate(
+        self, run_request_id: str, gate: Gate, *, max_sweeps: int
+    ) -> SweepOutcome | None:
+        """Return a crashed gate to PENDING, or fail the run once sweeps are exhausted.
+
+        The precondition is re-checked **inside** the transaction against the same lease
+        the caller saw expire. That is what makes a rescue happen exactly once: two
+        sweepers racing the same gate both read an expired lease, and the loser finds the
+        gate already PENDING (or leased by the winner's republish) and does nothing.
+
+        Only crashes are rescued. A ``FAILED`` gate is not touched here at all — it waits
+        for an operator retrigger (LLD §6 rule 3, owner requirement #7).
+
+        Returns:
+            The outcome, or None if another sweeper got there first.
+        """
+        doc_ref = self._collection.document(run_request_id)
+        now = self._clock()
+        prefix = f"gates.{gate.value}"
+
+        @firestore.transactional
+        def _rescue(transaction: firestore.Transaction) -> SweepOutcome | None:
+            snapshot = doc_ref.get(transaction=transaction)
+            if not snapshot.exists:
+                return None
+
+            run = GatekeeperRun.from_firestore(snapshot.to_dict())
+            if run.state not in {RunState.REQUESTED, RunState.RUNNING}:
+                return None
+
+            entry = run.gate(gate)
+            if entry.state is not GateState.RUNNING or entry.lease_held_at(now):
+                # Either already rescued, or the worker is alive after all.
+                return None
+
+            if entry.sweep_attempt >= max_sweeps:
+                transaction.update(
+                    doc_ref,
+                    {
+                        f"{prefix}.state": GateState.FAILED.value,
+                        f"{prefix}.endedAt": now,
+                        f"{prefix}.leaseOwner": None,
+                        f"{prefix}.leaseExpiresAt": None,
+                        f"{prefix}.errorCode": ErrorCode.GK_E_STUCK.value,
+                        f"{prefix}.errorDetail": (
+                            f"lease expired {entry.sweep_attempt} times; sweeps exhausted"
+                        ),
+                        "state": RunState.FAILED.value,
+                        "updatedAt": firestore.SERVER_TIMESTAMP,
+                    },
+                )
+                return SweepOutcome.STUCK
+
+            transaction.update(
+                doc_ref,
+                {
+                    f"{prefix}.state": GateState.PENDING.value,
+                    f"{prefix}.sweepAttempt": entry.sweep_attempt + 1,
+                    f"{prefix}.leaseOwner": None,
+                    f"{prefix}.leaseExpiresAt": None,
+                    "updatedAt": firestore.SERVER_TIMESTAMP,
+                },
+            )
+            return SweepOutcome.RESCUED
+
+        return self._commit(_rescue)
 
     # -- finalize -------------------------------------------------------------
 

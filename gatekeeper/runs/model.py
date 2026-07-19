@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Self
 
+from gatekeeper.contracts.payload import GatekeeperRunRequest
 from gatekeeper.enums import GATE_ORDER, Gate, GateState, JudgeMode, RunMode, RunState, TriggeredBy
 from gatekeeper.errors import ErrorCode
 from gatekeeper.timeutil import format_rfc3339, parse_rfc3339
@@ -161,6 +162,26 @@ class GatekeeperRun:
     def gate(self, gate: Gate) -> GateEntry:
         """The entry for ``gate``, defaulting to PENDING if the map predates it."""
         return self.gates.setdefault(gate, GateEntry())
+
+    def to_request(self, gate: Gate, *, triggered_by: TriggeredBy) -> GatekeeperRunRequest:
+        """Rebuild the Pub/Sub payload that would drive ``gate`` of this run.
+
+        The sweeper republishes work it never saw published, and the only record of the
+        original message is this document — which carries every envelope field, because
+        the payload is IDs and the doc stored all of them (LLD §5, §7.1). ``mode`` stays
+        ``FULL``: a rescue re-enters a gate the state machine already considers reachable,
+        which is not the same thing as an operator's FROM_GATE retrigger of failed work.
+        """
+        return GatekeeperRunRequest(
+            schema_version=self.schema_version,
+            run_request_id=self.run_request_id,
+            intake_id=self.intake_id,
+            stage3_run_id=self.stage3_run_id,
+            gate=gate,
+            mode=RunMode.FULL,
+            triggered_by=triggered_by,
+            request_timestamp=self.request_timestamp,
+        )
 
     def to_firestore(self) -> dict[str, Any]:
         """Storage form. ``createdAt``/``updatedAt`` are left to the caller's sentinels."""

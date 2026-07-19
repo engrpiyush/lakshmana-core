@@ -17,11 +17,14 @@ from io import StringIO
 import pytest
 
 from gatekeeper.config import SETTINGS, load_config
-from gatekeeper.enums import GATE_ORDER, Gate, next_gate, prior_gate
+from gatekeeper.enums import GATE_ORDER, Gate, JudgeMode, Method, Verdict, next_gate, prior_gate
 from gatekeeper.errors import ErrorCode, GatekeeperError, SchemaError
 from gatekeeper.logging import configure_logging, get_logger, log_context
 from gatekeeper.runs.model import COLLECTION, GatekeeperRun
 from gatekeeper.timeutil import format_rfc3339, parse_rfc3339
+from gatekeeper.worker.edges import EdgeVerdict
+from gatekeeper.worker.queue import COLLECTION as QUEUE_COLLECTION
+from gatekeeper.worker.queue import QueuedPair
 from tests.conftest import FIXTURES_DIR
 
 CAMEL_CASE = re.compile(r"^[a-z][a-zA-Z0-9]*$")
@@ -156,6 +159,50 @@ def test_python_attributes_are_snake_case() -> None:
     """The other half of the boundary rule: no camelCase in Python identifiers."""
     for name in GatekeeperRun.__slots__:
         assert name == name.lower(), name
+
+
+def test_queue_field_names_are_camel_case() -> None:
+    """The pair queue is a second serialization boundary and obeys the same rule."""
+    document = QueuedPair(
+        pair_id="run|a|b",
+        stage3_run_id="run",
+        intake_id="intake",
+        claim_a_id="a",
+        claim_b_id="b",
+    ).to_firestore()
+
+    for key in document:
+        assert CAMEL_CASE.match(key), f"{key} is not camelCase"
+
+
+def test_edge_field_names_are_camel_case() -> None:
+    """And so does the ``stage3_edges`` row, which another service reads."""
+    document = EdgeVerdict(
+        claim_a_id="a",
+        claim_b_id="b",
+        subject_id="subject",
+        intake_id="intake",
+        stage3_run_id="run",
+        run_request_id="req",
+        slot="g1",
+        method=Method.GK_G1_NLI,
+        judge_model="modernbert-base-nli@v1",
+        stage_scores={"neuFwd": 0.9},
+        verdict=Verdict.NEUTRAL,
+    ).to_firestore(JudgeMode.GATEKEEPER)
+
+    def _assert_camel(node, path=""):
+        if not isinstance(node, dict):
+            return
+        for key, value in node.items():
+            assert CAMEL_CASE.match(key), f"{path}.{key} is not camelCase"
+            _assert_camel(value, f"{path}.{key}")
+
+    _assert_camel(document)
+
+
+def test_the_queue_collection_name_is_snake_case() -> None:
+    assert QUEUE_COLLECTION == "gatekeeper_pairs"
 
 
 # -- enums --------------------------------------------------------------------

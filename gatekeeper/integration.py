@@ -21,9 +21,34 @@ from gatekeeper.config import Config
 from gatekeeper.enums import JudgeMode
 from gatekeeper.logging import get_logger
 
-__all__ = ["resolve_judge_mode"]
+__all__ = ["resolve_judge_mode", "resolve_subject_id"]
 
 log = get_logger(__name__)
+
+
+def resolve_subject_id(client: firestore.Client, config: Config, stage3_run_id: str) -> str:
+    """Read the ``subjectId`` a Stage 3 run is about.
+
+    The graph is keyed by subject, not by Stage 3 run — `JUDGE_QUEUED` relationships hang
+    off ``(:Claim {subjectId})`` — so this is the join between the run the message names and
+    the pairs the gate has to judge. It is a plain top-level field on ``stage3_runs``, unlike
+    ``judgeMode``, which lives inside the JSON-string ``paramsSnapshot``.
+
+    Returns:
+        The subject id, or ``""`` when the run doc or the field is missing. The caller
+        decides what that means; for a gate it is a hard failure, because there is nothing
+        to judge without it.
+    """
+    collection = config.get_str("gatekeeper.integration.stage3-runs-collection")
+    snapshot = client.collection(collection).document(stage3_run_id).get()
+    if not snapshot.exists:
+        log.warning("stage3 run doc not found", fields={"stage3RunId": stage3_run_id})
+        return ""
+
+    subject_id = str((snapshot.to_dict() or {}).get("subjectId") or "")
+    if not subject_id:
+        log.warning("stage3 run carries no subjectId", fields={"stage3RunId": stage3_run_id})
+    return subject_id
 
 
 def resolve_judge_mode(client: firestore.Client, config: Config, stage3_run_id: str) -> JudgeMode:

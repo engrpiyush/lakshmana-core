@@ -1,6 +1,6 @@
 # Gatekeeper — Stage 3 Judge Cascade LLD (Lakshmana)
 
-> v1.4 · 2026-07-19 (v1.4: **calibration decoupled from build** — §8 models are config-selectable with v1 defaults, §15 GO bar is no longer a build gate, per-run freeze invariant stated explicitly, O‑1/O‑2 re-scoped, O‑7 closed; v1.3: §8 artifact precision policy + `neutralConsensus` + G3 ordering, §13 per-precision bucket layout, §15 grid search and the escape-hatch finding; v1.2: §8 checkpoint ids verified, §12 log-metric contracts, §13 artifact pin chain + local mirror mode, O‑4 closed; v1.1: mermaid diagrams, Figures 1–4) · Status: **design approved for build; sessions 04–06 build against the v1 defaults, numeric thresholds calibrated afterwards (§15)**
+> v1.5 · 2026-07-19 (v1.5: **§7.3 corrected — the judge queue is a Neo4j relationship, not a Firestore collection**; routing moves to the lakshmana-owned `gatekeeper_pairs` because D‑8 makes the graph read-only for us, §7.4 restates the boundary and the one-row-per-pair edge shape, §7.5 drops an index the old design needed, §11 gains the sweeper's third pass and the dispatcher's OIDC/401 contract; v1.4: **calibration decoupled from build** — §8 models are config-selectable with v1 defaults, §15 GO bar is no longer a build gate, per-run freeze invariant stated explicitly, O‑1/O‑2 re-scoped, O‑7 closed; v1.3: §8 artifact precision policy + `neutralConsensus` + G3 ordering, §13 per-precision bucket layout, §15 grid search and the escape-hatch finding; v1.2: §8 checkpoint ids verified, §12 log-metric contracts, §13 artifact pin chain + local mirror mode, O‑4 closed; v1.1: mermaid diagrams, Figures 1–4) · Status: **design approved for build; sessions 04–06 build against the v1 defaults, numeric thresholds calibrated afterwards (§15)**
 > Confluence: child of Stage 3 LLD (249528322) · Mirror: `lakshmana-core/lakshmana-gatekeeper-lld-wiki.md`
 > Companions: Stage 3 LLD §11 (JUDGE), cost wiki 253001729 §9, `PLAN-stage3-cost-cut.md` (Workstream C is **superseded** by this document).
 
@@ -72,8 +72,8 @@ flowchart TD
         WORK["worker — Cloud Run Job, up to 24h<br/>load gate model · hydrate · infer · write"]
     end
 
-    FS[("Firestore<br/>gatekeeper_runs · stage3_edges · judge queue")]
-    NEO[("Neo4j read-only<br/>claims · explanations")]
+    FS[("Firestore<br/>gatekeeper_runs · gatekeeper_pairs · stage3_edges")]
+    NEO[("Neo4j read-only<br/>claims · explanations · JUDGE_QUEUED")]
     GCS[("GCS<br/>gatekeeper-models")]
     VX["Vertex flash-lite<br/>(G4 tail only)"]
 
@@ -237,23 +237,38 @@ shadow            { verdict, method, stageScores, gkRunRequestId }   // SHADOW m
 
 `stageScores` is deliberately kept at full precision: it enables offline threshold recalibration without re-inference, powers the shadow disagreement report, and is the training corpus for the eventual fine-tune (VA‑79 becomes a weight swap).
 
-### 7.3 Judge queue extensions (collection owned by vishwamitra/MATCH; additive)
+### 7.3 `gatekeeper_pairs` — the cascade's routing queue (new; lakshmana-owned)
+
+> **Corrected in v1.5 (VA-99, 2026-07-19).** This section previously described the judge queue as a Firestore *collection owned by vishwamitra/MATCH* that lakshmana would add routing fields to. **It is not a Firestore collection.** In vishwamitra the judge queue is a Neo4j relationship — `(:Claim)-[q:JUDGE_QUEUED {rank, blockScore, sources, humanAsserted, withContext, status}]->(:Claim)`, written wholesale (delete-then-create) by MATCH in `Stage3GraphRepository.applyMatchOutcome`, with `q.status` serving as the JUDGE phase's own cursor.
+>
+> Since lakshmana's graph access is **read-only by construction** (D‑8: RBAC user with MATCH-read only, `READ_ACCESS` sessions client-side), the routing fields below cannot be written where the old text put them. They live in a collection lakshmana owns outright instead, seeded from the graph as G1's second act (after the purge). Every property the original section wanted is preserved — per-pair tier, current gate, lease-based batch claiming, `decidedBy` — and two constraints the literal reading would have broken are preserved with it: **the graph keeps its single writer**, and **vishwamitra's queue stays exactly as MATCH left it**, so a rollback to `JudgeMode = LLM` requires nothing to be undone.
+
+Doc id = `{stage3RunId}|{claimIdLow}|{claimIdHigh}` — deterministic, so seeding is an idempotent upsert and a redelivered gate cannot fork one pair into two entries.
 
 ```
-tier          "CASCADE" | "LLM_TAIL" | "HUMAN"     // decided-tier routing
-gate          current owner gate (G1..G4) or null when decided
-leaseOwner / leaseExpiresAt                         // batch claiming by workers
-decidedBy     method string (mirror of the edge, for queue-side queries)
+{ stage3RunId, intakeId, claimAId, claimBId, claimIdLow, claimIdHigh,
+  rank, withContext, humanAsserted,                   // copied from JUDGE_QUEUED
+  tier          "CASCADE" | "LLM_TAIL" | "HUMAN",     // decided-tier routing
+  gate          current owner gate (G1..G4) or null when decided,
+  contradictionFlag,                                  // G1's escape hatch, carried to G3
+  decidedBy     method string (mirror of the edge, for queue-side queries),
+  gkRunRequestId,
+  leaseOwner / leaseExpiresAt,                        // batch claiming by workers
+  createdAt, updatedAt }
 ```
+
+**Two leases, doing different jobs.** The gate lease on `gatekeeper_runs` (90 min, §6 rule 1) admits one worker per gate. The pair lease here (15 min) is a *cursor*: a worker that dies mid-batch leaves pairs leased but undecided, and the resumed worker re-claims them once the short lease lapses while skipping every pair that already moved to the next gate.
 
 ### 7.4 Ownership boundary
 
-Lakshmana **writes**: `gatekeeper_runs`, `stage3_edges` (gatekeeper methods + `shadow.*`), queue routing fields. Lakshmana **reads**: queue, claims/explanations (Neo4j RO). Vishwamitra remains the **sole writer of `Stage3Run`** — its existing poll observes `gatekeeper_runs.state == SUCCEEDED` and advances its own lifecycle; no callback, no notification (owner requirement #6). ASSEMBLE consumes verdicts regardless of `method`.
+Lakshmana **writes**: `gatekeeper_runs`, `gatekeeper_pairs` (its own routing, §7.3), `stage3_edges` (gatekeeper methods + `shadow.*`). Lakshmana **reads**: the `JUDGE_QUEUED` queue and claims/explanations (Neo4j RO), and `stage3_runs` for `subjectId` + `judgeMode`. **Lakshmana never writes to Neo4j** (D‑8) — the graph keeps vishwamitra/ASSEMBLE as its sole writer, which is why §7.3's routing state is a Firestore collection rather than relationship properties. Vishwamitra remains the **sole writer of `Stage3Run`** — its existing poll observes `gatekeeper_runs.state == SUCCEEDED` and advances its own lifecycle; no callback, no notification (owner requirement #6). ASSEMBLE consumes verdicts regardless of `method`.
+
+**One edge row per pair, not per gate.** §7.2's `stageScores: {g1, g2, g3}` is a single `stage3_edges` document that each gate merges its own slot into; the doc id is `{claimIdLow}|{claimIdHigh}|{bare|ctx}|GK`, mirroring vishwamitra's own `(pair, variant, promptStamp)` key shape with `GK` in the stamp position. Writes are `merge=True` upserts, which is what makes the job's `maxRetries 1` safe (§13) and what lets a crashed gate resume without duplicating a row.
 
 ### 7.5 Composite indexes (land in vishwamitra's `firestore.indexes.json` — one database, one index file)
 
-- queue: `(stage3RunId ASC, tier ASC, gate ASC, leaseExpiresAt ASC)`
 - `gatekeeper_runs`: `(intakeId ASC, createdAt DESC)`
+- `gatekeeper_pairs`: none required. The gate loop's candidate query is equality-only (`stage3RunId` + `gate`), which Firestore serves by merging single-field indexes; leases and rank are filtered and ordered in Python over one batch. *(The `(stage3RunId, tier, gate, leaseExpiresAt)` composite this section previously listed was for the queue-as-collection design and is not needed.)*
 
 ## 8. Gates
 
@@ -305,7 +320,9 @@ decide_g1(pair, s):                                  # s = stageScores.g1
   forward()                                          # → G2
 ```
 
-Counters: `seen, neutral, repeats, contraFlagged, forwarded, truncated, ctxDisagreed`.
+Counters: `seen, neutral, repeats, contraFlagged, forwarded, truncated, ctxDisagreed`. All seven are written at zero rather than omitted — §7.1 makes them a UI contract, and a missing key and a zero mean different things to the gate-progress panel.
+
+**As built (VA-99):** G1 also owns the run's setup, because it is the only gate guaranteed to run first — the FROM_START purge (§10) and then seeding `gatekeeper_pairs` from the graph. `attempt == 1` *is* FROM_START: a new `runRequestId` is the only thing that creates a run doc, and creation claims G1 at attempt 1, so any later G1 execution is a redelivery, a sweeper rescue or a FROM_GATE — all of which are resuming output the purge would destroy. The contexted variant is the claim text and its explanation concatenated (`\n\n`); §11.9 does not fix the composition, and concatenation is what keeps the bare and contexted scores comparable — the replay harness makes the same choice, and the two must agree or replay parity means nothing.
 
 ### G2_CORROBORATION — sees the G1 leftovers (~15–20%)
 
@@ -339,7 +356,7 @@ Two gaps VA-97 had to close, both resolved toward escalating rather than decidin
 - **`neutralConsensus`** was named here but had no config key and no proposed value. It is now `gatekeeper.gates.g3.neutral-consensus` (env `GATEKEEPER_G3_NEUTRAL_CONSENSUS`), default **0.10**, a proposal like every other number in this section, and it appears in `configSnapshot.g3`.
 - **`both_neutral_lean`** was undefined. It reads as *neutral is the argmax in both directions of both families* — the strictest available reading. Anything looser lets a pair the two families disagree about be discarded as NEUTRAL, which is precisely what the cross-check exists to prevent.
 
-**Gate ordering for flagged pairs.** A pair carrying G1's contradiction flag reaches G3 whatever G2 thinks of it — this section's own G3 heading says it sees "contradiction-flagged + G2 leftovers". G2 is therefore not allowed to finalize CORROBORATES on a flagged pair; doing so would put a contradiction signal beyond the reach of the cross-check meant to adjudicate it. Figure 4's funnel is unchanged in shape.
+**Gate ordering for flagged pairs.** A pair carrying G1's contradiction flag reaches G3 whatever G2 thinks of it — this section's own G3 heading says it sees "contradiction-flagged + G2 leftovers". G2 is therefore not allowed to finalize CORROBORATES on a flagged pair; doing so would put a contradiction signal beyond the reach of the cross-check meant to adjudicate it. Figure 4's funnel is unchanged in shape. The flag rides on `gatekeeper_pairs.contradictionFlag` (§7.3), which is how it survives the gap between two independently-scheduled gate executions.
 
 ### G4_ESCALATION — target ≤ 5%; hard cap `maxLlmPairs` (3,000)
 
@@ -361,7 +378,7 @@ The mode is pinned into `Stage3Run.paramsSnapshot` at run start and read from th
 
 ## 10. Re-runs, purge, retrigger
 
-- **FROM_START** (new `runRequestId`, minted by vishwamitra): G1's first act — before any inference — is the purge: delete `stage3_edges` where `method IN (GK_*)` for this `stage3RunId`, reset queue routing fields to `{tier: CASCADE, gate: G1_NEUTRAL}`, clear leases. Idempotent (safe under redelivery: the purge re-run deletes nothing new). `ENSEMBLE` / `RULE` / `EMBEDDING` rows and all `shadow.*` history are untouched (D‑5).
+- **FROM_START** (new `runRequestId`, minted by vishwamitra): G1's first act — before any inference — is the purge: delete `stage3_edges` where `method IN (GK_*)` for this `stage3RunId`, reset `gatekeeper_pairs` routing to `{tier: CASCADE, gate: G1_NEUTRAL}`, clear leases. Idempotent (safe under redelivery: the purge re-run deletes nothing new). `ENSEMBLE` / `RULE` / `EMBEDDING` rows are untouched (D‑5) — the purge is scoped to `stage3RunId`, a field only lakshmana writes on its own rows, *and* re-checks every candidate's `method` against the `GK_*` set before deleting, so an ensemble row cannot be reached even in principle.
 - **FROM_GATE** (same `runRequestId`): valid only when that gate is `FAILED` (or lease-expired `RUNNING`); the gate returns to `PENDING` and its message is republished. Earlier gates' outputs are retained.
 - **Supersede:** §6 rule 4. The vishwamitra run page always operates on `latest gatekeeper_runs by (intakeId, createdAt)`.
 
@@ -377,7 +394,12 @@ The mode is pinned into `Stage3Run.paramsSnapshot` at run start and read from th
 | `GK_E_CAP_EXCEEDED` | G4 `maxLlmPairs` hit | remainder → HUMAN with `CAP_EXCEEDED`; run SUCCEEDED + warning counter |
 | `GK_E_STUCK` | sweeps exhausted | run FAILED; runbook |
 
-**Sweeper** (Cloud Scheduler → dispatcher `/sweep`, every 15 min, OIDC — the VA‑39 pattern): (a) `RUNNING` gates with expired leases → `PENDING` + republish (`sweepAttempt ≤ 3`, then FAILED); (b) `REQUESTED` runs with no claim after 30 min → republish G1; (c) DLQ depth surfaced to the alert channel. **The sweeper rescues crashes, never failures** — failures wait for the operator (owner requirement #7).
+**Sweeper** (Cloud Scheduler → dispatcher `/sweep`, every 15 min, OIDC — the VA‑39 pattern): (a) `RUNNING` gates with expired leases → `PENDING` + republish (`sweepAttempt ≤ 3`, then FAILED); (b) runs idle past 30 min with no gate running → republish the *actionable* gate; (c) DLQ depth surfaced to the alert channel. **The sweeper rescues crashes, never failures** — failures wait for the operator (owner requirement #7).
+
+Two clarifications from the VA‑98 build:
+
+- **Pass (b) is about lost messages, not `REQUESTED` runs.** A `gatekeeper_runs` doc is created *by the dispatcher on its first claim* (§14), and that claim immediately sets the run `RUNNING` — so a `REQUESTED` doc with no claim cannot exist, and the original wording described an unreachable state. The reachable version of the same hazard is the crash window §5 names: a worker commits its gate, then dies before publishing the next one. The sweeper therefore republishes the **first `PENDING` gate whose predecessor has `SUCCEEDED`** on a run that has been idle past the grace period and has nothing running. A run with any `FAILED` gate has no actionable gate — that is pass (a)'s "never failures" rule restated. Pass (b) is skipped entirely when pass (a) rescued something on the same run, so one gate never gets two messages from one sweep.
+- **The dispatcher rejects unauthenticated callers with 401**, not 400. A message that fails OIDC may be perfectly well-formed; it is the *caller* that is unacceptable. Pub/Sub retries a 401 and the message reaches the DLQ after five attempts, which is where traffic we cannot authenticate belongs. `GK_E_SCHEMA` (400) stays reserved for payloads we cannot parse. Verification is on by default and fails closed: an unconfigured deployment refuses traffic rather than accepting it. An empty allow-list accepts any Google-issued identity and warns on every request — the pre-Terraform default, never the deployed one.
 
 **Runbook skeleton** (full doc lands in `lakshmana-core/RUNBOOK.md`, LK‑12): symptom → `gatekeeper_runs` doc (which gate, `errorCode`, `attempt`) → worker logs filtered by `runRequestId` → action = fix data/config → retrigger from UI (FROM_GATE preferred) → DLQ replay command for poisoned messages.
 
@@ -394,7 +416,7 @@ Three of the five alerts sit on native GCP metrics (DLQ depth, job execution res
 | `gatekeeper/run_overdue` | `jsonPayload.event="run_overdue"` | the sweeper, when a run has been `RUNNING` past the threshold (2 h) — LK‑11 |
 | `gatekeeper/cap_exceeded` | `jsonPayload.errorCode="GK_E_CAP_EXCEEDED"` | G4, when `maxLlmPairs` is hit — LK‑10 |
 
-Both metrics may be applied before the emitting code exists; they simply read zero.
+Both metrics may be applied before the emitting code exists; they simply read zero. **`run_overdue` is live as of VA-98** — the sweeper emits it on every pass over a run older than the threshold.
 
 ## 13. Infra (`lakshmana-infra`) & IAM
 
@@ -415,6 +437,8 @@ Both metrics may be applied before the emitting code exists; they simply read ze
 | `gatekeeper-push-sa` / scheduler SA | dispatcher service | `roles/run.invoker` |
 
 Resource names as built: push subscription `gatekeeper-requests-push`, DLQ inspection subscription `gatekeeper-requests-dlq-pull` (pull, not push — a poisoned message is replayed by an operator from the runbook, never automatically). The Pub/Sub **service agent** additionally holds `pubsub.publisher` on the DLQ topic and `pubsub.subscriber` on the push subscription; without both the dead-letter policy is configured but inert. The dispatcher also holds `iam.serviceAccountUser` on `gatekeeper-worker-sa`, because starting a job means acting as the job's identity.
+
+**The worker job carries no gate in its own environment.** One job definition serves all four gates; the dispatcher passes `GATEKEEPER_RUN_REQUEST_ID`, `GATEKEEPER_GATE` and `GATEKEEPER_LEASE_OWNER` as container overrides on each execution. Baking any of the three into the job would leave a stale value for a hand-run execution to pick up.
 
 **Bucket layout (manifest schemaVersion 2).** `gs://<bucket>/<name>/<version>/<precision>/{model.onnx,tokenizer.json,config.json}` with one `manifest.json` at `<name>/<version>/`. `precision` is `fp32` or `int8`; both are mirrored, the manifest's top-level `precision` field names the shipping one, and the loader materializes only that one into its disk cache (flattened, so nothing downstream needs to know which it got). The manifest is always written **last** — until it exists the loader treats the prefix as absent, so a half-finished upload is invisible rather than corrupt.
 
@@ -443,6 +467,8 @@ interface GatekeeperClient {
 
 Publish failures: bounded retry with backoff; terminal publish failure surfaces on the run page as `PUBLISH_FAILED` with a manual retry button (no silent loss). 4. **Run-page gate panel**: per-gate chips (state/counters/durations from `gatekeeper_runs`), failure card (`errorCode` + detail), retrigger buttons (FROM_START / failed-gate), shadow-disagreement summary line in SHADOW mode.
 
+**`stage3_runs.subjectId` is a read dependency.** The graph is keyed by subject, not by Stage 3 run, so lakshmana resolves `stage3RunId → subjectId` off that document to find the pairs. It is already present on every run doc; it is listed here so a future change to the field does not silently strand the gatekeeper.
+
 ## 15. Replay & cutover plan
 
 > **Calibration is decoupled from the build (owner directive 2026-07-19).** The full-corpus
@@ -462,6 +488,8 @@ Publish failures: bounded retry with backoff; terminal publish failure surfaces 
 
    *Built VA-97 (2026-07-19):* `scripts/export_replay_corpus.py` (Firestore → JSONL, with an `--inspect` pass that reports the collection's real field names before exporting, because `stage3_edges` is vishwamitra's and only the fields **this** document adds to it are pinned here) and `scripts/replay_bakeoff.py`. The bake-off scores each artifact over the corpus **once**, caches the raw probabilities, and replays the cached numbers through `gatekeeper.gates.decisions` — the same functions sessions 04‑06 wrap in worker plumbing — so a few hundred threshold combinations cost seconds against the hours of inference behind them.
 
+   *Parity is enforced, not assumed (VA-99).* The production gate loop and the replay harness both call `gatekeeper/gates/decisions.py`, and `tests/test_g1_gate.py` asserts they reach the same disposition from the same scores and the same `configSnapshot` thresholds. That makes parity a **wiring** check — it proves the gate feeds the decision function the directions and thresholds it claims to, and routes the answer it got back — rather than a numbers check.
+
 2. **GO bar (owner signs at the report; a calibration bar, not a build gate):** NEUTRAL precision ≥ 0.95 at ≥ 60% coverage · CONTRADICTS recall ≥ 95% of the ensemble's own recall on golden pairs · projected G4 ≤ 5%. NO-GO → swap roster rows and re-run replay (architecture unchanged — and now a config swap, §8).
 
    **The contradiction criterion is unmeasurable on the corpus exported so far.** Those 12,208 pairs (the 209-claim reference subject) contain **zero golden pairs and zero CONTRADICTS verdicts** — that vishwamitra run judged every pair bare, so `withContext=true` is absent too and the ensemble never returned a contradiction. The recall criterion has an empty denominator and is reported **unmeasurable**, not passed (`goBar.unmeasurable` in the archived report); on this corpus the bar reduces to NEUTRAL precision/coverage + projected G4 volume + escape-hatch mechanics. Closing O‑2 needs a second corpus from an intake whose ensemble did return CONTRADICTS (DEFERRED-LIVE 17). Until then the escape hatch and the G3 cross-check are exercised only by unit tests, never by real contradicting claims.
@@ -472,7 +500,7 @@ Publish failures: bounded retry with backoff; terminal publish failure surfaces 
 
    **Early signal on `contraEscape` (2026-07-19, 14 hand-written pairs — indicative only, not evidence).** The proposed 0.02 flagged 7 of 8 genuinely-neutral pairs, while true contradictions scored 0.985–0.9997. The separation between the two populations is wide, and the proposed threshold sits far below it. Expect the real corpus to move `contraEscape` up by roughly an order of magnitude; it is likely the single most consequential number in this document, since it drives both G1 coverage and G4 volume.
 3. **SHADOW** on the next real run → disagreement report must match replay-predicted rates.
-4. **Flip** to `GATEKEEPER`. Rollback = set `JudgeMode = LLM` (one config value; the ensemble path is untouched by this entire design).
+4. **Flip** to `GATEKEEPER`. Rollback = set `JudgeMode = LLM` (one config value; the ensemble path is untouched by this entire design — and, since §7.3's routing never touches vishwamitra's `JUDGE_QUEUED` relationships, nothing has to be undone in the graph either).
 
 ## 16. Worked example — the 209-claim reference subject (12,208 pairs)
 
@@ -515,6 +543,7 @@ flowchart TD
 | O‑5 | `PLAN-stage3-cost-cut.md` Workstream C: mark superseded by this LLD | ~~next vishwamitra session~~ **DONE 2026-07-19** (plan doc + cost wiki v1.3) | plan doc |
 | O‑6 | **INT8 is not usable as exported** — all seven checkpoints failed the sanity diff and ship fp32 (§8). Either accept fp32 (larger artifacts, slower CPU inference, §16 estimates optimistic by 2.5–4×) or land a better quantization: static/calibrated INT8, or per-op exclusions for the layers that drift. | owner, after the LK‑5 report | roster + §16 estimates |
 | O‑7 | ~~The replay corpus was unreachable in session03~~ **CLOSED 2026-07-19** — the corpus was exported (12,208 pairs, `var/replay/corpus.jsonl`) and 4 of 7 artifacts scored before the owner stopped the run. What remains is calibration, not access: it is O‑1/O‑2 plus DEFERRED-LIVE 17–19, not a separate open item. | — | — |
+| O‑8 | **`gatekeeper_pairs` is a new collection in vishwamitra's Firestore database** (§7.3) — one database, and lakshmana now owns a collection in it. No index is required and nothing else reads it, but the owner should be aware it exists before the first live run, and it is worth a line in vishwamitra's data-model notes. | owner | §7.3 |
 
 ## References
 

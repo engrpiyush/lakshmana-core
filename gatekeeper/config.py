@@ -182,9 +182,39 @@ SETTINGS: tuple[Setting, ...] = (
         "stage3_runs",
         str,
     ),
+    Setting(
+        "gatekeeper.integration.stage3-edges-collection",
+        "GATEKEEPER_STAGE3_EDGES_COLLECTION",
+        "stage3_edges",
+        str,
+    ),
+    Setting("gatekeeper.queue.collection", "GATEKEEPER_QUEUE_COLLECTION", "gatekeeper_pairs", str),
+    Setting("gatekeeper.queue.batch-size", "GATEKEEPER_QUEUE_BATCH_SIZE", 32, int),
+    Setting("gatekeeper.queue.lease-minutes", "GATEKEEPER_QUEUE_LEASE_MINUTES", 15, int),
+    # --- dispatcher ingress ------------------------------------------------------
+    # Push deliveries carry an OIDC token; the dispatcher is internal-ingress but that
+    # is a network control, not an authentication one, so the token is verified too.
+    # Empty audience means "accept the token's own audience" — a deployment that has not
+    # been told its URL yet still authenticates the caller's identity.
+    Setting(
+        "gatekeeper.dispatcher.require-oidc", "GATEKEEPER_DISPATCHER_REQUIRE_OIDC", True, _to_bool
+    ),
+    Setting("gatekeeper.dispatcher.oidc-audience", "GATEKEEPER_DISPATCHER_OIDC_AUDIENCE", "", str),
+    Setting(
+        "gatekeeper.dispatcher.allowed-service-accounts",
+        "GATEKEEPER_DISPATCHER_ALLOWED_SERVICE_ACCOUNTS",
+        "",
+        str,
+    ),
     Setting("gatekeeper.firestore.project-id", "GATEKEEPER_FIRESTORE_PROJECT_ID", "", str),
     Setting("gatekeeper.firestore.database", "GATEKEEPER_FIRESTORE_DATABASE", "(default)", str),
     Setting("gatekeeper.pubsub.topic", "GATEKEEPER_PUBSUB_TOPIC", "gatekeeper-requests", str),
+    Setting(
+        "gatekeeper.pubsub.dlq-subscription",
+        "GATEKEEPER_PUBSUB_DLQ_SUBSCRIPTION",
+        "gatekeeper-requests-dlq-pull",
+        str,
+    ),
     Setting("gatekeeper.worker.job-name", "GATEKEEPER_WORKER_JOB_NAME", "gatekeeper-worker", str),
     Setting("gatekeeper.worker.job-region", "GATEKEEPER_WORKER_JOB_REGION", "asia-southeast1", str),
     Setting("gatekeeper.worker.execute-jobs", "GATEKEEPER_WORKER_EXECUTE_JOBS", False, _to_bool),
