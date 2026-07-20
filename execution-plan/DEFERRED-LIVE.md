@@ -63,3 +63,48 @@ Cross-cutting: (a) **contraEscape 0.02 is ~2 orders low** — generic NLI puts >
 | B6 | **The G1 default pin is the slowest model in the roster**, on the gate that is 86% of all inferences. Measured: `modernbert-base-nli` ≥80 min for 24,416 inferences at 5.84 cores, vs `deberta-mnli-fever-anli` at 34.3 inf/s on 12. Swapping G1 is a **config change**. | filesystem mtimes of `var/replay/scores/*`; today's live run | config (pending calibration) |
 
 **Corrected throughput basis (the earlier estimates in this file and in LLD §16 were ~2× optimistic in the same direction).** The measured bake-off window was **78 min, not 2.5 h** (scores dir 16:18 → last artifact 17:36), and each artifact pass is **24,416 inferences, not 48,832** — the contexted/grounded passes are dense subsets and this corpus has **zero** `withContext` and **zero** `sourceSnippet`. Corrected: **~1.1 Mac-core-s per inference**; a **40,000-pair intake ≈ 9–10 h for G1 alone, ~13 h encoder end-to-end** on one 4-vCPU worker at fp32 — against a 90-minute lease and a 6 h task timeout. Per-artifact rates differ **6.4×**, so there is no single "per-inference constant" to quote.
+
+## ✅ THE SIGNAL WAS THERE — we were reading the wrong number (2026-07-20, adversarially audited)
+
+**The encoder approach was never broken; it was mismeasured.** Every result so far scored the models'
+*neutral* head. The usable signal is in their **contradiction** head, read with the sign **flipped**.
+
+| Decision rule (honest claim-grouped CV, threshold fitted on TRAIN claims) | coverage | precision |
+| --- | --- | --- |
+| **`min(fwd,bwd)` contradiction prob of `modernbert-base-nli` < ~0.05–0.09 ⇒ NEUTRAL** | **65.8%** | **94.8%** |
+| 60-feature stack over all 7 artifacts (logistic) | 58.2% ±5.3 | 95.4% |
+| Random forest over all 7 | 64.1% ±5.4 | 95.6% |
+| Blanket "everything is NEUTRAL" floor | 100% | 88.3% |
+
+`modernbert.contradiction` has **|AUC| 0.790** — the same model whose *neutral* head scored 0.280. Its 89%
+"false contradiction alarm" rate is not noise: **it is a NEUTRAL detector**. Logistic coefficients confirm the
+inversion is systematic — every artifact's contradiction channel is positive for NEUTRAL, every neutral
+channel negative.
+
+**Ship one model and one threshold, not seven.** Paired on identical held-out sets, the 7-model stack adds
+**−1.9 to +0.6 coverage points** at the 95% bar, CI straddling zero (the only real gain is RF at the 97%
+point, +12.8 pts, CI [+0.7,+22.4]). The two grounding models are dead weight here: `minicheck` |AUC| 0.517,
+`factcg` 0.040. Six of seven artifacts cost 7× inference for noise.
+
+**Method quality:** claim-grouped CV verified line-by-line in both builders and re-implemented independently
+by the auditor (grouped on BOTH claims, straddlers dropped from train and test — 80.4% of pairs). Label-shuffle
+control collapses to AUC 0.509 / cov 0.0004 → no pipeline leak. Naive random CV overstates by ~10 pts, so the
+grouped discipline was load-bearing. Builder A's headline 63.2% was **oracle-thresholded** (threshold picked on
+test) and is corrected to 58.2% nested-honest.
+
+**Three gates before this ships:**
+1. **P(precision ≥ 0.95) ≈ 0.53** on claim-bootstrap resamples — 209 clusters, not 12,208 rows. Honest headline
+   is "95% ± 2.4 pts", and cov@0.99 numbers rest on ~250 held-out CORROBORATES and are near-meaningless.
+2. **The label is the Gemini ensemble, not truth.** 21% of CORROBORATES were 4/5 splits; 2.5% of NEUTRALs are
+   confidence-floor artifacts. This measures *replaceability of the LLM*, not correctness.
+3. **One subject, 209 claims**, zero contradictions, zero contexted pairs — and the winning threshold is an
+   *absolute* probability cutoff with no a-priori reason to transfer.
+
+**NEXT STEP (the only one that matters): hold out a second subject entirely and re-measure the same threshold
+cold.** Coverage holding near 0.6 ⇒ ship the one-feature gate and close the bake-off. Collapse ⇒ the signal is
+subject-specific and the encoder family is dead for production.
+
+**Design consequence:** LLD §8's `decide_g1` inverts. Today it decides NEUTRAL on a high *neutral* score and
+treats contradiction as an escape hatch at 0.02. The evidence says **the calibrated escape hatch IS the gate** —
+decide NEUTRAL on a low contradiction score (~0.05–0.09), ignore the neutral head entirely. Simpler, one model,
+one number, and it retires the "safety knob vs cost knob" tension: the same threshold now serves both.
