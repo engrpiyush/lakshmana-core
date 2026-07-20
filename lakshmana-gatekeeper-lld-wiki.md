@@ -1,6 +1,6 @@
 # Gatekeeper — Stage 3 Judge Cascade LLD (Lakshmana)
 
-> v1.7 · 2026-07-19 (v1.7: **§8 G4 + FINALIZE as-built (VA-102), §10 retrigger as-built (VA-103)** — **O‑3 CLOSED**: the G4 prompt is vishwamitra's judge prompt family with the rubric resolved live from `extraction_prompts/STAGE3_JUDGE`, batching collapsed to one pair, `flipPresentation` dropped (k=1 has nothing to alternate over) and `sharedEntities` dropped (lakshmana's queue read does not carry it); G4's cap is durable across executions, a Vertex error costs its pair and never the gate, a parse failure is an error and never a verdict, and live calls are **off by default** behind `gatekeeper.gates.g4.live-calls`; `llmModel` default becomes the concrete `gemini-2.5-flash-lite`; §7.2 gains `rationale`/`temporalNote` and omits an empty `stageScores` slot entirely; §7.1 gains run-level `errorCode`/`errorDetail` for FINALIZE's failure path; FINALIZE recomputes `totals` from the queue and refuses to succeed a run with a stranded pair; `shadowDisagreed` ships as 0 with VA-105 owning the real number; D‑5 strengthened — the ensemble row carries **no** `stage3RunId` and **no** `method`, so the purge query cannot reach one even in principle; v1.6: **§8 G2/G3 as-built (VA-100/VA-101)** — G2's source snippet is read from Firestore `claims.sourceExcerpt`, not the graph, which never carries it (new `gatekeeper.integration.claims-collection`); `groundingMode` is AUTO/OFF with no REQUIRED; flagged pairs cross G2 without inference; G3's contradiction candidate takes `min(famA, famB)` as its confidence, writes `relation = CONTRADICTS` as the *candidate* the §11.10 queue reads while never setting `decidedBy`, and treats a missing family A as a hard failure rather than re-inferring or defaulting; §7.2 `stageScores` sub-maps corrected — `g3` keeps all six probabilities and drops the threshold-dependent `agreed`, `g2` keeps both grounded orientations; per-gate counters named; v1.5: **§7.3 corrected — the judge queue is a Neo4j relationship, not a Firestore collection**; routing moves to the lakshmana-owned `gatekeeper_pairs` because D‑8 makes the graph read-only for us, §7.4 restates the boundary and the one-row-per-pair edge shape, §7.5 drops an index the old design needed, §11 gains the sweeper's third pass and the dispatcher's OIDC/401 contract; v1.4: **calibration decoupled from build** — §8 models are config-selectable with v1 defaults, §15 GO bar is no longer a build gate, per-run freeze invariant stated explicitly, O‑1/O‑2 re-scoped, O‑7 closed; v1.3: §8 artifact precision policy + `neutralConsensus` + G3 ordering, §13 per-precision bucket layout, §15 grid search and the escape-hatch finding; v1.2: §8 checkpoint ids verified, §12 log-metric contracts, §13 artifact pin chain + local mirror mode, O‑4 closed; v1.1: mermaid diagrams, Figures 1–4) · Status: **design approved for build; sessions 04–06 build against the v1 defaults, numeric thresholds calibrated afterwards (§15)**
+> v1.8 · 2026-07-20 (v1.8: **§17 CALIBRATION FINDINGS — the decision rule inverts.** `modernbert-base-nli`'s *contradiction* channel (|AUC| 0.790) is the usable signal; its *neutral* channel (0.280) is anti-correlated. One model, one threshold, **65.8% coverage at 94.8% precision**, vs the shipped rule's 27.6% at 78.2% — which is *below* the 88.3% no-information floor. All six rosters FAILED the §15 GO bar, 0/360 grid cells, on the **old** rule. §8's `decide_g1` is superseded pending VA-156's cold second-subject validation; §15's GO bar and §16's economics restated; the 7-model stack adds nothing (CI straddles zero) and both grounding artifacts are dead weight here. Evidence appendix: child page 256606209. Also filed: VA-156/157/160 (calibration line) and VA-158/159 (two deployed-code defects found in the same pass); v1.7: **§8 G4 + FINALIZE as-built (VA-102), §10 retrigger as-built (VA-103)** — **O‑3 CLOSED**: the G4 prompt is vishwamitra's judge prompt family with the rubric resolved live from `extraction_prompts/STAGE3_JUDGE`, batching collapsed to one pair, `flipPresentation` dropped (k=1 has nothing to alternate over) and `sharedEntities` dropped (lakshmana's queue read does not carry it); G4's cap is durable across executions, a Vertex error costs its pair and never the gate, a parse failure is an error and never a verdict, and live calls are **off by default** behind `gatekeeper.gates.g4.live-calls`; `llmModel` default becomes the concrete `gemini-2.5-flash-lite`; §7.2 gains `rationale`/`temporalNote` and omits an empty `stageScores` slot entirely; §7.1 gains run-level `errorCode`/`errorDetail` for FINALIZE's failure path; FINALIZE recomputes `totals` from the queue and refuses to succeed a run with a stranded pair; `shadowDisagreed` ships as 0 with VA-105 owning the real number; D‑5 strengthened — the ensemble row carries **no** `stage3RunId` and **no** `method`, so the purge query cannot reach one even in principle; v1.6: **§8 G2/G3 as-built (VA-100/VA-101)** — G2's source snippet is read from Firestore `claims.sourceExcerpt`, not the graph, which never carries it (new `gatekeeper.integration.claims-collection`); `groundingMode` is AUTO/OFF with no REQUIRED; flagged pairs cross G2 without inference; G3's contradiction candidate takes `min(famA, famB)` as its confidence, writes `relation = CONTRADICTS` as the *candidate* the §11.10 queue reads while never setting `decidedBy`, and treats a missing family A as a hard failure rather than re-inferring or defaulting; §7.2 `stageScores` sub-maps corrected — `g3` keeps all six probabilities and drops the threshold-dependent `agreed`, `g2` keeps both grounded orientations; per-gate counters named; v1.5: **§7.3 corrected — the judge queue is a Neo4j relationship, not a Firestore collection**; routing moves to the lakshmana-owned `gatekeeper_pairs` because D‑8 makes the graph read-only for us, §7.4 restates the boundary and the one-row-per-pair edge shape, §7.5 drops an index the old design needed, §11 gains the sweeper's third pass and the dispatcher's OIDC/401 contract; v1.4: **calibration decoupled from build** — §8 models are config-selectable with v1 defaults, §15 GO bar is no longer a build gate, per-run freeze invariant stated explicitly, O‑1/O‑2 re-scoped, O‑7 closed; v1.3: §8 artifact precision policy + `neutralConsensus` + G3 ordering, §13 per-precision bucket layout, §15 grid search and the escape-hatch finding; v1.2: §8 checkpoint ids verified, §12 log-metric contracts, §13 artifact pin chain + local mirror mode, O‑4 closed; v1.1: mermaid diagrams, Figures 1–4) · Status: **design approved for build; sessions 04–06 build against the v1 defaults, numeric thresholds calibrated afterwards (§15)**
 > Confluence: child of Stage 3 LLD (249528322) · Mirror: `lakshmana-core/lakshmana-gatekeeper-lld-wiki.md`
 > Companions: Stage 3 LLD §11 (JUDGE), cost wiki 253001729 §9, `PLAN-stage3-cost-cut.md` (Workstream C is **superseded** by this document).
 
@@ -316,6 +316,14 @@ Numeric thresholds below are **proposals**; LK‑5 replay sets the real values a
 
 ### G1_NEUTRAL — sees 100% of capped pairs
 
+> ⛔ **The `decide_g1` rule below is SUPERSEDED by §17 (2026-07-20).** Measured on 12,208 ensemble-labelled
+> pairs, the *neutral* head this rule consults is anti-correlated with the answer (AUC 0.280) and the rule
+> lands at 27.6% coverage / 78.2% precision — **below the 88.3% no-information floor**. The evidence says the
+> **calibrated contradiction score IS the gate**: decide NEUTRAL when `min(fwd,bwd)` contradiction is *below*
+> ~0.05–0.09, and drop the neutral-head consultation entirely (65.8% coverage at 94.8% precision). The
+> pseudocode is retained here as the as-built record of what shipped; VA‑157 replaces it once VA‑156's cold
+> second-subject validation returns GO.
+
 Hydrate texts by claim id (Neo4j RO); `withContext` pairs (§11.9 dual-eval) also fetch the explanation text and run a contexted variant. Run NLI forward + backward, batch 32.
 
 ```
@@ -581,7 +589,103 @@ flowchart TD
     H --> FIN
 ```
 
-## 17. Open items
+## 17. Calibration findings (LK‑5 replay, 2026‑07‑20)
+
+> Full evidence record, method controls and reproduction detail: **child page 256606209**
+> ("Gatekeeper — Calibration Findings"). This section carries the results and the decisions they force.
+> Corpus: 12,208 pairs · 209 claims · **one** subject · labels = the Gemini k=5 ensemble
+> (10,776 NEUTRAL / 1,432 CORROBORATES / **0 CONTRADICTS** / 0 golden / 0 contexted). Zero LLM spend.
+
+### 17.1 The GO bar, applied mechanically — all six rosters FAIL on the shipped rule
+
+| Roster | G1 artifact | NEUTRAL precision | coverage | encoders / LLM / human | grid |
+| --- | --- | --- | --- | --- | --- |
+| cheap | nli-deberta-v3-small | 0.834 | 50.0% | 50% / 25% / 24% | 0/60 |
+| ettinx | ettinx-nli-s | 0.837 | 37.1% | 38% / 43% / 20% | 0/60 |
+| ettinx-vitaminc | ettinx-nli-s | 0.831 | 37.3% | 38% / 60% / 2% | 0/60 |
+| **v1 (shipped default)** | modernbert-base-nli | **0.782** | 27.6% | 28% / 49% / 22% | 0/60 |
+| v1-factcg | modernbert-base-nli | 0.773 | 28.2% | 28% / 49% / 22% | 0/60 |
+| v1-vitaminc | modernbert-base-nli | 0.774 | 27.9% | 29% / 69% / 3% | 0/60 |
+
+**0 of 360 threshold combinations passed.** The funnel column is the second failure: §16 assumed encoders
+absorb 97% and the tail 2.3%; as configured **the LLM tail takes 25–69%** and the human queue up to 24%.
+
+### 17.2 The finding — the signal is in the contradiction head, inverted
+
+| Decision rule (claim-grouped CV, threshold fitted on TRAIN claims) | coverage | precision |
+| --- | --- | --- |
+| **`min(fwd,bwd)` contradiction of `modernbert-base-nli@v1` < ~0.05–0.09 ⇒ NEUTRAL** | **65.8%** | **94.8%** |
+| 60-feature logistic stack over all 7 artifacts | 58.2% ±5.3 | 95.4% |
+| Random forest over all 7 artifacts | 64.1% ±5.4 | 95.6% |
+| Blanket "everything is NEUTRAL" — the no-information floor | 100% | 88.3% |
+
+`modernbert-base-nli`'s contradiction channel: **|AUC| 0.790**. Its neutral channel: **0.280**. Its 89%
+"false contradiction alarm" rate is not noise — it is a *topical-relatedness* detector, and silence on it
+means "unrelated". Two structural facts fall out:
+
+- **Every artifact's neutral-head AUC is below 0.5** (0.280–0.390) — inverted, not absent. The models'
+  contradiction confusion concentrates on ensemble-NEUTRAL pairs (career timelines read as contradictions),
+  depressing their neutral scores below the CORROBORATES pairs'.
+- **Performance is inversely ordered by logic-training.** ModernBERT (ANLI+FOLIO+LogicNLI+doc-NLI) is
+  furthest from chance; the plainest heads are closest to it. **More off-the-shelf NLI capability makes this
+  worse — the roster search is closed permanently.** (Retires the roster half of O‑1.)
+
+### 17.3 One model, not seven
+
+Paired on identical held-out sets, stack minus single feature: logistic **−0.019** coverage @0.95,
+RF **+0.006**; paired cluster bootstrap **CI [−0.034, +0.203] — straddles zero**. The only defensible gain
+is RF at the 0.97 point (+0.128, CI [+0.007, +0.224]). Ablations: `modernbert-only` (6 features) matches all
+50; `no-modernbert` (44) reaches the same place independently — the others are *redundant with* it, not
+additive. **Both grounding artifacts are dead weight here**: `minicheck-deberta-l` |AUC| 0.517
+(coverage@0.95 = 0.4%), `factcg-deberta-l` 0.040 — the **G2 slot has no working candidate**.
+
+### 17.4 Method quality
+
+Claim-grouped CV (folds partition *claim ids*; a pair is evaluated only when **both** its claims are held
+out — 80.4% straddlers dropped from train and test alike, n_eval ≈ 2,390/partition, held-out base rate 0.884
+vs 0.883 overall), verified line-by-line and re-implemented independently by an adversarial reviewer.
+Label-shuffle control collapses (pooled AUC 0.509, coverage@0.95 = 0.0004) — no pipeline leak. Naive random
+splits overstate by **~10 coverage points**, so the grouping was load-bearing. One correction applied: an
+oracle-thresholded 63.2% headline became **58.2% ±5.3** under honest nested threshold transfer.
+
+### 17.5 Three caveats that gate the ship decision
+
+1. **Power.** 209 claim clusters, not 12,208 rows. **P(realized precision ≥ 0.95) ≈ 0.53** on claim
+   bootstrap — the honest headline is "95% **± 2.4 pts**". Coverage@0.99 rests on ~250 held-out
+   CORROBORATES and is near-meaningless.
+2. **The label is not truth** — a 5-sample Gemini ensemble with a confidence floor; **21% of CORROBORATES
+   were 4/5 splits**, ~2.5% of NEUTRALs are floor artifacts. This measures *replaceability of the LLM*.
+3. **One subject**, zero contradictions, zero contexted pairs, and the winning threshold is an **absolute**
+   probability cutoff with no a-priori reason to transfer.
+
+### 17.6 Consequences
+
+- **§8 `decide_g1` inverts** (banner in §8; ticket **VA‑157**): decide NEUTRAL on a *low* contradiction
+  score, delete the neutral-head branch, use `min` of the two directions.
+- **G2/G3 become pass-throughs** until a candidate earns those slots — the tree is bouncer → LLM tail →
+  human.
+- **G4 volume rises from a designed 2.3% to ~34%** (15×). `maxLlmPairs = 3000` would be exceeded ~4.5× at a
+  40k-pair intake, silently draining 10,000+ pairs into the human queue. Cap and cost model must be re-set
+  (**VA‑160**).
+- **Economics: ~3× on the judging leg**, not the 60× §1/§16 advertise — on top of VA‑77's banked reduction.
+- **The §15 "safety knob vs cost knob" tension dissolves**: one threshold now serves both, pointing the
+  same way.
+- **The gate decision:** **VA‑156** — hold out a second subject entirely and re-measure the same threshold
+  **cold**. Coverage near 0.6 ⇒ ship the one-feature gate and close the bake-off; collapse ⇒ the signal is
+  subject-specific and the encoder family is dead for production. Nothing else is worth doing first.
+
+### 17.7 Found in the same pass — two defects in deployed code (not calibration)
+
+- **VA‑158 (CRITICAL):** `GATEKEEPER_G4_LIVE_CALLS` is absent from `lakshmana-infra`, so it defaults to
+  false → `DryRunVertexClient`. A live intake would write **fabricated NEUTRAL verdicts** and report
+  **SUCCEEDED**. Needs the env var *and* a startup assertion that refuses dry-run under
+  `judgeMode = GATEKEEPER`.
+- **VA‑159 (HIGH):** the gate lease has **no renewal path**, so the sweeper republishes gates whose workers
+  are alive (up to 4 concurrent, ~4× cost), and `route_all`'s unconditional batch write can strand pairs and
+  fail a fully-paid run at FINALIZE, or regress a pair a later gate settled. Both are §6/§11 assumptions
+  that a multi-hour gate breaks.
+
+## 18. Open items
 
 | # | Item | Owner | Lands |
 | --- | --- | --- | --- |
