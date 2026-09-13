@@ -34,7 +34,7 @@ from gatekeeper.enums import (
     QueueTier,
     Verdict,
 )
-from gatekeeper.errors import Neo4jUnavailableError, VertexError
+from gatekeeper.errors import DryRunInGatekeeperError, Neo4jUnavailableError, VertexError
 from gatekeeper.gates.g4 import run_g4
 from gatekeeper.worker.edges import edge_key
 from gatekeeper.worker.gates import GateContext
@@ -466,16 +466,60 @@ def test_shadow_mode_makes_zero_calls(
 # --- the default door ---------------------------------------------------------------------------
 
 
-def test_the_dry_run_double_is_the_default(
+def test_gatekeeper_mode_refuses_the_dry_run_double(
     store, claimed, emulator_client, gate_config, collections, subject
 ) -> None:
-    """An unconfigured worker runs the whole tail without reaching Vertex (hard rule 4)."""
+    """VA-158 / B1: a deciding run must never settle pairs with the dry-run double.
+
+    Before the fix, an unconfigured worker (``client_for`` returns the double because
+    ``GATEKEEPER_G4_LIVE_CALLS`` is off, and the deploy left it unset) wrote a canned NEUTRAL
+    for every escalated pair and reported SUCCEEDED — silent corruption of the hardest pairs
+    in the set. Now the gate refuses the moment the door is built, before any verdict is
+    written: ``GK_E_G4_DRYRUN``, no rows, run FAILED.
+    """
     pairs = _pairs(2)
     _seed_at_g4(emulator_client, collections, claimed.stage3_run_id, claimed.intake_id, pairs)
 
     run = store.get(claimed.run_request_id)
     run.judge_mode = JudgeMode.GATEKEEPER
-    # No `llm_factory_override`: this exercises `client_for` and the shipped default.
+    # No `llm_factory_override`: this exercises `client_for` and the shipped default, which
+    # with live calls off is the dry-run double — exactly the production misconfiguration.
+    with pytest.raises(DryRunInGatekeeperError, match="dry-run double"):
+        run_g4(
+            GateContext(
+                run=run,
+                gate=Gate.G4_ESCALATION,
+                config=gate_config,
+                client=emulator_client,
+                lease_owner=OWNER,
+                reader_factory=lambda: FakeGraph(pairs, _texts(pairs)),
+            )
+        )
+
+    # Not a single fabricated verdict reached the edge set.
+    assert list(emulator_client.collection(collections["edges"]).stream()) == []
+    # And the pairs are still sitting at G4, untouched, for a retrigger once live calls are on.
+    queued = PairQueue(emulator_client, collection=collections["queue"]).all_pairs(
+        claimed.stage3_run_id
+    )
+    assert {pair.gate for pair in queued} == {Gate.G4_ESCALATION}
+
+
+def test_shadow_mode_never_reaches_the_dry_run_refusal(
+    store, claimed, emulator_client, gate_config, collections, subject
+) -> None:
+    """The refusal is scoped to deciding runs: SHADOW builds no door, so the default is fine.
+
+    SHADOW with no override would resolve to the dry-run double if it ever asked for one —
+    it does not, because comparing an LLM to an LLM spends money to learn nothing. So a
+    SHADOW run on an unconfigured worker records ``WOULD_ESCALATE_LLM`` and never refuses,
+    which is what keeps the local end-to-end cascade runnable without live credentials.
+    """
+    pairs = _pairs(2)
+    _seed_at_g4(emulator_client, collections, claimed.stage3_run_id, claimed.intake_id, pairs)
+
+    run = store.get(claimed.run_request_id)
+    run.judge_mode = JudgeMode.SHADOW
     counters = run_g4(
         GateContext(
             run=run,
@@ -487,10 +531,8 @@ def test_the_dry_run_double_is_the_default(
         )
     )
 
-    assert counters["decided"] == 2
-    # Nothing was spent, because nothing was called.
-    assert counters["llmSpendUsd"] == 0
-    assert counters["promptTokens"] == 0
+    assert counters["shadowSuppressed"] == 2
+    assert counters["llmCalls"] == 0
 
 
 def test_the_dry_run_answer_says_it_is_a_dry_run() -> None:

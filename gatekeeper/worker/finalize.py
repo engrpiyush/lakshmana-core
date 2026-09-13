@@ -177,6 +177,16 @@ def finalize(
     log.info(
         "run finalized",
         fields={
+            # `event` + the flat counts are the observability contract for the run-level log
+            # metrics (LLD §12, VA-104): the escalation tail's size over time is the number
+            # the cutover and cost decisions read, and it should not require parsing a nested
+            # `totals` map out of a log line. The map stays too, for a human reading the line.
+            "event": "run_finalized",
+            "pairsSeen": totals.pairs_seen,
+            "decidedByGates": totals.decided_by_gates,
+            "escalatedLlm": totals.escalated_llm,
+            "escalatedHuman": totals.escalated_human,
+            "llmSpendUsd": totals.llm_spend_usd,
             "totals": totals.to_firestore(),
             "judgeMode": run.judge_mode.value,
             # §8: FINALIZE publishes nothing. Said out loud because "did anything get

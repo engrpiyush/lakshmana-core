@@ -99,6 +99,15 @@ def run_g2(context: GateContext) -> dict[str, Any]:
     batch_size = config.get_int("gatekeeper.queue.batch-size")
 
     while True:
+        # Renew-or-stop before claiming more (VA-159/B2): keep the lease ahead of the
+        # sweeper while alive, and abort without writing if a rescue has already taken it.
+        if not context.renew_lease():
+            log.warning(
+                "G2 no longer holds its gate lease; stopping without claiming more work",
+                fields={"leaseOwner": context.lease_owner},
+            )
+            break
+
         batch = queue.claim_batch(
             run.stage3_run_id,
             Gate.G2_CORROBORATION,

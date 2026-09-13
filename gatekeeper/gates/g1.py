@@ -121,6 +121,18 @@ def run_g1(context: GateContext) -> dict[str, Any]:
     batch_size = config.get_int("gatekeeper.queue.batch-size")
 
     while True:
+        # Renew the gate lease before claiming more work, and stop if it has moved on: a
+        # gate that outruns its 90-minute lease would otherwise be rescued mid-flight and
+        # a second worker started on it (VA-159/B2). Renewing keeps a live worker's lease
+        # ahead of the sweeper; a False return means a rescue already happened and this
+        # worker must not write another batch.
+        if not context.renew_lease():
+            log.warning(
+                "G1 no longer holds its gate lease; stopping without claiming more work",
+                fields={"leaseOwner": context.lease_owner},
+            )
+            break
+
         batch = queue.claim_batch(
             run.stage3_run_id,
             Gate.G1_NEUTRAL,

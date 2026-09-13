@@ -30,6 +30,14 @@ calling an LLM here would spend money to compare an LLM to an LLM. The pairs are
 `shadow.verdict = WOULD_ESCALATE_LLM` — a statement about routing, which is the only true
 thing the row can say — and the tail's *size* is still measured, which is the number the
 cutover decision actually needs.
+
+*A deciding run refuses the dry-run double.* In GATEKEEPER mode the tail's verdicts are
+authoritative, so a door reporting `live = False` here would write canned NEUTRALs and let
+the run report SUCCEEDED — the B1 silent-corruption bug (VA-158). The gate refuses at the
+moment the door is built, before any verdict is written, rather than trusting the deploy to
+have set `GATEKEEPER_G4_LIVE_CALLS`. The dry-run double stays what it always was — a local
+affordance — and is reachable only where fabrication is harmless: SHADOW, which calls
+nothing at all.
 """
 
 from __future__ import annotations
@@ -47,7 +55,12 @@ from gatekeeper.enums import (
     Method,
     QueueTier,
 )
-from gatekeeper.errors import ErrorCode, Neo4jUnavailableError, VertexError
+from gatekeeper.errors import (
+    DryRunInGatekeeperError,
+    ErrorCode,
+    Neo4jUnavailableError,
+    VertexError,
+)
 from gatekeeper.gates.prompts import ClaimCard, g4_judge_prompt, judge_rubric, parse_g4_response
 from gatekeeper.integration import resolve_subject_id
 from gatekeeper.logging import get_logger
@@ -137,6 +150,17 @@ def run_g4(context: GateContext) -> dict[str, Any]:
     batch_size = config.get_int("gatekeeper.queue.batch-size")
 
     while True:
+        # Renew-or-stop before claiming more (VA-159/B2). It matters most here: G4 is the
+        # gate that spends money, so a rescued straggler double-judging its pairs is not
+        # just wasted work but a second bill. A False return means a rescue already owns
+        # this gate — stop before another paid call.
+        if not context.renew_lease():
+            log.warning(
+                "G4 no longer holds its gate lease; stopping without claiming more work",
+                fields={"leaseOwner": context.lease_owner},
+            )
+            break
+
         batch = queue.claim_batch(
             run.stage3_run_id,
             Gate.G4_ESCALATION,
@@ -154,6 +178,20 @@ def run_g4(context: GateContext) -> dict[str, Any]:
         # gate with nothing left to judge must not construct credentials to discover it.
         if client is None:
             client = context.llm_factory(config, model, thinking_budget)
+            # VA-158 / B1: in a deciding run the tail's verdicts are authoritative, so a
+            # dry-run double here would settle every escalated pair with a canned NEUTRAL
+            # and let the run report SUCCEEDED. Refuse the moment the door is built —
+            # before a single fabricated verdict is written — rather than trust that
+            # `GATEKEEPER_G4_LIVE_CALLS` was set. SHADOW never reaches this branch (it
+            # calls nothing), and an injected live double reports `live = True`, so this
+            # fires only on the genuine misconfiguration it exists to catch.
+            if run.judge_mode is JudgeMode.GATEKEEPER and not client.live:
+                raise DryRunInGatekeeperError(
+                    "G4 reached a GATEKEEPER-mode run with the dry-run double: live calls "
+                    "are off (gatekeeper.gates.g4.live-calls) and no live door was "
+                    "injected. A deciding run must not fabricate verdicts — set "
+                    "GATEKEEPER_G4_LIVE_CALLS=true, or run this stage in SHADOW."
+                )
             rubric = judge_rubric(
                 context.client,
                 collection=config.get_str("gatekeeper.integration.prompts-collection"),
@@ -180,14 +218,9 @@ def run_g4(context: GateContext) -> dict[str, Any]:
             fields={"batch": len(batch), "seen": counters["seen"], "llmPairs": spent},
         )
 
-    if client is not None and not client.live:
-        # Loud, because a run doc showing `decided` on a tail that never called anything is
-        # exactly the thing someone would later read as evidence the tail works.
-        log.warning(
-            "G4 ran against the dry-run double; no verdict here came from a model",
-            fields={"decided": counters["decided"]},
-        )
-
+    # No dry-run warning here: a GATEKEEPER run with a non-live door has already been
+    # refused at the client-build site above, and SHADOW never builds a door at all. The
+    # only way this point is reached is with a live door, so there is nothing to warn about.
     return dict(counters)
 
 

@@ -440,6 +440,61 @@ class GatekeeperRunStore:
 
         return self._commit(_settle)
 
+    def renew_gate_lease(self, run_request_id: str, gate: Gate, *, lease_owner: str) -> bool:
+        """Extend the gate lease for the worker that holds it — the heartbeat (LLD §11, B2).
+
+        The gate lease was written once at claim and never renewed, so a gate that outlived
+        its 90-minute lease — a 40k-pair G1 pass does by 6-7x — looked dead to the sweeper
+        while it was still running, and a second worker was started on the same gate. A live
+        worker calling this once per batch keeps ``leaseExpiresAt`` (and ``updatedAt``, which
+        the sweeper's stalled-run pass reads) ahead of the sweeper, so only a genuinely dead
+        worker is ever rescued.
+
+        It doubles as the loss detector. If the lease has already moved — a rescue happened
+        while this worker was stalled — it returns False, and the caller must stop without
+        writing rather than race the rescuer for the same pairs (B3). The same is true once
+        the run itself is no longer live: a SUPERSEDED run's straggler learns to stop here.
+
+        This is the fourth and only other write site for the gate lease, alongside claim,
+        settle-clear and rescue-clear; like all of them it is a single transaction so at most
+        one outcome is ever observed.
+
+        Returns:
+            True if the caller still holds a RUNNING lease on this gate (now extended);
+            False if the run is gone, terminal or superseded, or the lease has moved on.
+        """
+        doc_ref = self._collection.document(run_request_id)
+        now = self._clock()
+        prefix = f"gates.{gate.value}"
+
+        @firestore.transactional
+        def _renew(transaction: firestore.Transaction) -> bool:
+            snapshot = doc_ref.get(transaction=transaction)
+            if not snapshot.exists:
+                return False
+
+            run = GatekeeperRun.from_firestore(snapshot.to_dict())
+            if run.state not in {RunState.REQUESTED, RunState.RUNNING}:
+                return False
+
+            entry = run.gate(gate)
+            # Only the current holder renews. A worker whose lease was swept finds either a
+            # different owner or a gate no longer RUNNING here, and takes that as its cue to
+            # abort — exactly the check `_settle_gate` makes before committing.
+            if entry.state is not GateState.RUNNING or entry.lease_owner != lease_owner:
+                return False
+
+            transaction.update(
+                doc_ref,
+                {
+                    f"{prefix}.leaseExpiresAt": now + self._lease,
+                    "updatedAt": firestore.SERVER_TIMESTAMP,
+                },
+            )
+            return True
+
+        return self._commit(_renew)
+
     # -- sweep ----------------------------------------------------------------
 
     def active_runs(self) -> list[GatekeeperRun]:

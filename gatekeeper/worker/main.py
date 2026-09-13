@@ -24,6 +24,7 @@ from gatekeeper.errors import GatekeeperError
 from gatekeeper.logging import configure_logging, get_logger, log_context
 from gatekeeper.runs.model import GatekeeperRun
 from gatekeeper.runs.store import GatekeeperRunStore
+from gatekeeper.timeutil import utc_now
 from gatekeeper.worker.gates import GateContext, runner_for
 from gatekeeper.worker.queue import PairQueue
 
@@ -67,6 +68,14 @@ def run_gate(
         return EXIT_BAD_INVOCATION
 
     context = context_factory(run)
+    if context.lease_guard is None:
+        # The heartbeat that keeps a long gate from being rescued out from under itself, and
+        # the check that makes a swept worker stop before it writes (VA-159/B2). Wired here,
+        # once, so every caller of run_gate gets it; a test that injects its own guard —
+        # e.g. one that reports the lease revoked — is left untouched.
+        context.lease_guard = lambda: store.renew_gate_lease(
+            run_request_id, gate, lease_owner=lease_owner
+        )
     try:
         counters = runner_for(gate)(context)
     except GatekeeperError as exc:
@@ -90,7 +99,15 @@ def run_gate(
         log.warning("gate commit was rejected; not publishing the next gate")
         return EXIT_BAD_INVOCATION
 
-    log.info("gate committed", fields={"counters": counters})
+    # `event` + `durationMs` are the observability contract for the `gatekeeper/gate_duration`
+    # log metric (LLD §12, VA-104): the wall-clock a gate took, labelled by gate, without
+    # anyone opening the run doc. Duration is measured from the claim (`startedAt`) to now.
+    started = run.gate(gate).started_at
+    duration_ms = int((utc_now() - started).total_seconds() * 1000) if started else None
+    log.info(
+        "gate committed",
+        fields={"event": "gate_committed", "durationMs": duration_ms, "counters": counters},
+    )
 
     # Commit first, publish second — always. The window between them is a crash the
     # sweeper rescues; the reverse order would let a redelivery double-run a gate whose

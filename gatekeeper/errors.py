@@ -8,6 +8,7 @@ from enum import StrEnum
 
 __all__ = [
     "CapExceededError",
+    "DryRunInGatekeeperError",
     "ErrorCode",
     "FirestoreTxnError",
     "GatekeeperError",
@@ -29,6 +30,7 @@ class ErrorCode(StrEnum):
     GK_E_VERTEX = "GK_E_VERTEX"
     GK_E_CAP_EXCEEDED = "GK_E_CAP_EXCEEDED"
     GK_E_STUCK = "GK_E_STUCK"
+    GK_E_G4_DRYRUN = "GK_E_G4_DRYRUN"
 
 
 class GatekeeperError(Exception):
@@ -81,3 +83,16 @@ class StuckError(GatekeeperError):
     """Sweeps exhausted — run FAILED, see the runbook."""
 
     code = ErrorCode.GK_E_STUCK
+
+
+class DryRunInGatekeeperError(GatekeeperError):
+    """G4 reached a deciding run with the dry-run double — gate FAILED, never fabricated.
+
+    In GATEKEEPER mode the cascade's verdicts are authoritative, so a G4 tail backed by the
+    dry-run double would write canned NEUTRAL verdicts into ``stage3_edges`` and let the run
+    report SUCCEEDED. The double is a local-testing affordance and must never be reachable in
+    a deciding run: the gate refuses instead. The fix is to enable live calls
+    (``GATEKEEPER_G4_LIVE_CALLS=true``) or to run in SHADOW. See VA-158 / DEFERRED-LIVE B1.
+    """
+
+    code = ErrorCode.GK_E_G4_DRYRUN

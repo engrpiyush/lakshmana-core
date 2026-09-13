@@ -52,6 +52,13 @@ DEFAULT_LEASE_MINUTES = 15
 _WRITE_BATCH_LIMIT = 400
 """Under Firestore's 500-write ceiling, with room for the batch's own bookkeeping."""
 
+_ROUTE_TXN_LIMIT = 200
+"""Routing chunk per transaction: a read and a write each, so ≤400 ops under the 500 limit.
+
+``route_all`` reads every pair before writing it (the guard below), so its chunk is half
+the plain-write ``_WRITE_BATCH_LIMIT``. Real gate batches are ``queue.batch-size`` (32),
+well inside one chunk; this only bounds the pathological bulk call."""
+
 
 def pair_key(stage3_run_id: str, claim_a_id: str, claim_b_id: str) -> str:
     """The deterministic doc id for a pair within a Stage 3 run.
@@ -330,30 +337,62 @@ class PairQueue:
     # -- routing --------------------------------------------------------------
 
     def route_all(self, updates: Iterable[tuple[QueuedPair, dict[str, Any]]]) -> int:
-        """Apply one gate's routing decisions to a batch of pairs.
+        """Apply one gate's routing decisions, but only to pairs this worker still owns.
 
-        Written as an unconditional batch rather than a transaction: the pair lease has
-        already established that this worker owns these rows, and the gate lease that it
-        is the only worker on this gate. Paying for a transaction per batch would buy
-        nothing the two leases have not already bought.
+        Each update is guarded transactionally against Firestore's own copy of the row: it
+        is written only if the pair is **still at the gate this worker claimed it from** and
+        **still carries this worker's lease**. A pair that fails either check is skipped,
+        because another worker legitimately owns it now.
+
+        That guard is what makes routing safe once the "one worker per gate" invariant can
+        break (VA-159/B3). The old unconditional write assumed the gate lease meant sole
+        ownership; a gate that outlived its lease and was rescued broke exactly that
+        assumption, and a straggler could then strand a pair at a gate already marked
+        SUCCEEDED — failing FINALIZE's reconciliation after the whole LLM budget was spent —
+        or regress one a later gate had settled. Lease renewal (B2) keeps the invariant true
+        in the common case; this is the belt to its braces, verified against the live row in
+        the same transaction as the write.
+
+        Returns:
+            The number of pairs actually written — skipped pairs are logged, not counted.
         """
+        materialized = list(updates)
         written = 0
-        batch = self._client.batch()
-        pending = 0
-
-        for pair, changes in updates:
-            payload = dict(changes)
-            payload["leaseOwner"] = None
-            payload["leaseExpiresAt"] = None
-            payload["updatedAt"] = firestore.SERVER_TIMESTAMP
-            batch.update(self._collection.document(pair.pair_id), payload)
-            written += 1
-            pending += 1
-            if pending >= _WRITE_BATCH_LIMIT:
-                batch.commit()
-                batch = self._client.batch()
-                pending = 0
-
-        if pending:
-            batch.commit()
+        for start in range(0, len(materialized), _ROUTE_TXN_LIMIT):
+            written += self._route_chunk(materialized[start : start + _ROUTE_TXN_LIMIT])
         return written
+
+    def _route_chunk(self, chunk: Sequence[tuple[QueuedPair, dict[str, Any]]]) -> int:
+        refs = [self._collection.document(pair.pair_id) for pair, _ in chunk]
+
+        @firestore.transactional
+        def _apply(transaction: firestore.Transaction) -> int:
+            # Firestore demands every read before any write, so the whole chunk is read
+            # first and the guard evaluated against the live rows, then written.
+            snapshots = [ref.get(transaction=transaction) for ref in refs]
+            applied = 0
+            for (pair, changes), ref, snapshot in zip(chunk, refs, snapshots, strict=True):
+                if not snapshot.exists:
+                    continue
+                current = QueuedPair.from_firestore(snapshot.id, snapshot.to_dict() or {})
+                if current.gate is not pair.gate or current.lease_owner != pair.lease_owner:
+                    # The pair advanced past this gate, or its lease changed hands — a
+                    # rescuer owns it now. Overwriting it is the B3 regression.
+                    log.warning(
+                        "skipping a stale route: the pair moved on since it was claimed",
+                        fields={
+                            "pairId": pair.pair_id,
+                            "claimedGate": pair.gate.value if pair.gate else None,
+                            "currentGate": current.gate.value if current.gate else None,
+                        },
+                    )
+                    continue
+                payload = dict(changes)
+                payload["leaseOwner"] = None
+                payload["leaseExpiresAt"] = None
+                payload["updatedAt"] = firestore.SERVER_TIMESTAMP
+                transaction.update(ref, payload)
+                applied += 1
+            return applied
+
+        return _apply(self._client.transaction())

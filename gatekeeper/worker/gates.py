@@ -63,6 +63,17 @@ class GateContext:
     injection make the door fail on demand.
     """
 
+    lease_guard: Callable[[], bool] | None = None
+    """Renew this gate's lease and report whether the worker still holds it (VA-159/B2).
+
+    Wired by :func:`~gatekeeper.worker.main.run_gate` to
+    :meth:`~gatekeeper.runs.store.GatekeeperRunStore.renew_gate_lease` so a gate loop can call
+    :meth:`renew_lease` once per batch: a live worker keeps its lease ahead of the sweeper,
+    and a worker whose lease was swept learns it has lost the gate and stops before it writes.
+    Left ``None`` in unit tests that drive a gate directly — :meth:`renew_lease` then always
+    reports True, so a test with no store still runs the loop it came to exercise.
+    """
+
     _reader: Neo4jReader | None = field(default=None, init=False, repr=False)
     _loader: ModelLoader | None = field(default=None, init=False, repr=False)
 
@@ -77,6 +88,15 @@ class GateContext:
         from gatekeeper.clients.vertex import client_for
 
         return client_for(config, model=model, thinking_budget=thinking_budget)
+
+    def renew_lease(self) -> bool:
+        """Renew the gate lease, or report that it has moved on (VA-159/B2).
+
+        Called at the top of every gate's batch loop. True when no guard is wired — a bare
+        :class:`GateContext` in a unit test holds its lease for the life of the call by
+        definition, so the loop runs as it always has.
+        """
+        return self.lease_guard() if self.lease_guard is not None else True
 
     def reader(self) -> Neo4jReader:
         """The read-only graph handle, built once per gate execution."""
